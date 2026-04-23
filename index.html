@@ -1,0 +1,1168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>地形生成器 v1.0 - Perlin & A* Rivers</title>
+    <style>
+        body {
+            background-color: #222;
+            color: #eee;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        h2 { margin-bottom: 10px; }
+        .controls {
+            margin-bottom: 20px;
+            background: #333;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background 0.3s;
+        }
+        button:hover { background-color: #45a049; }
+        canvas {
+            border: 2px solid #555;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            image-rendering: pixelated; /* 保持像素清晰，复古感 */
+        }
+        .legend {
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>地形生成器 (200x200)</h2>
+    
+    <div class="controls">
+        <button onclick="generateWorld()">重新生成地图</button>
+        <button onclick="startUnitSimulation()">开始战争模拟</button>
+        <button id="toggleUnitsBtn" onclick="toggleUnitPositions()">显示单位位置</button>
+    </div>
+
+    <canvas id="mapCanvas" width="600" height="600"></canvas>
+    
+    <div class="legend">
+        颜色说明: 深蓝(水) -> 绿(平原) -> 灰(山地) -> 白(雪顶) | 蓝色线条: 河流
+    </div>
+    <div id="leaderboards" style="margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 600px;">
+        <div>
+            <h3 style="margin: 0; font-size: 16px;">单位数排行</h3>
+            <div id="unitLeaderboard"></div>
+        </div>
+        <div>
+            <h3 style="margin: 0; font-size: 16px;">占领格数排行</h3>
+            <div id="cellLeaderboard"></div>
+        </div>
+    </div>
+
+<script>
+/**
+ * ------------------------------------------------------------------
+ * 1. 基础工具类与柏林噪声实现 (Perlin Noise)
+ * ------------------------------------------------------------------
+ */
+const Permutation = [151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180];
+const p = new Array(512);
+for (let i=0; i < 256 ; i++) p[256+i] = p[i] = Permutation[i];
+
+function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+function lerp(t, a, b) { return a + t * (b - a); }
+function grad(hash, x, y, z) {
+    const h = hash & 15;
+    const u = h < 8 ? x : y, v = h < 4 ? y : h === 12 || h === 14 ? x : z;
+    return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+}
+
+// 简化版 2D Perlin
+function perlin(x, y) {
+    const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+    x -= Math.floor(x); y -= Math.floor(y);
+    const u = fade(x), v = fade(y);
+    const A = p[X]+Y, AA = p[A]+0, AB = p[A+1]+0, B = p[X+1]+Y, BA = p[B]+0, BB = p[B+1]+0;
+    return lerp(v, lerp(u, grad(p[AA], x, y, 0), grad(p[BA], x-1, y, 0)),
+               lerp(u, grad(p[AB], x, y-1, 0), grad(p[BB], x-1, y-1, 0)));
+}
+
+/**
+ * ------------------------------------------------------------------
+ * 2. 核心参数与配置
+ * ------------------------------------------------------------------
+ */
+const SIZE = 200;
+const CANVAS_SIZE = 600; // 渲染尺寸
+const SCALE_FACTOR = CANVAS_SIZE / SIZE; // 放大倍数
+let RIVERS_COUNT = Math.floor(SIZE * 0.07);
+let DESIRED_SETTLEMENTS = Math.floor(SIZE * SIZE / 200);
+
+// 存储地图数据
+let heightMap = []; // 2D 数组
+let riverMap = [];  // 2D 数组 (0:无, 1:有河流)
+let COLORS = [];
+const STRENGTH_DECAY = 0.1;
+const NEUTRAL_COLOR = '#888888';
+let factions = [];
+let units = [];
+let worldTime = 0;
+let simulationTimer = null;
+let unitOwner = [];
+let unitStrength = [];
+const WAVE_DECAY = 5;
+const WAVE_FADE_THRESHOLD = 1;
+let waveOwner = [];
+let waveStrength = [];
+let waveDis = [];
+let showUnitPositions = false;
+let ferryMap = [];
+
+function generateDistinctColors(count) {
+    const colors = [];
+    for (let i = 0; i < count; i++) {
+        const hue = (i * 360) / count;
+        colors.push(`hsl(${hue}, 80%, 55%)`);
+    }
+    return colors.sort(() => Math.random() - 0.5);
+}
+
+/**
+ * ------------------------------------------------------------------
+ * 3. 噪声生成算法
+ * ------------------------------------------------------------------
+ */
+// 基础地形：标准 Perlin
+function getBaseTerrain(x, y, seed, scale = 0.03) {
+    // 缩放系数：越小地形越平缓
+    return perlin(x * scale + seed, y * scale + seed);
+}
+
+// 山脊：FBM (分形布朗运动) + 绝对值处理
+function getRidgeNoise(x, y, seed) {
+    let value = 0;
+    let amplitude = 1;
+    let frequency = 0.08;
+    let maxValue = 0;
+
+    // 叠加 3 层 octaves
+    for(let i=0; i<3; i++) {
+        // Math.abs(perlin) * -1 创建尖锐的谷底，然后反转成为山脊
+        // 这里简化：直接用 abs 产生褶皱，然后取反或归一化
+        let n = perlin(x * frequency + seed, y * frequency + seed);
+        value += Math.abs(n) * amplitude; 
+        maxValue += amplitude;
+        amplitude *= 0.5;
+        frequency *= 2;
+    }
+    return value / maxValue; 
+}
+
+function generateWorld() {
+    heightMap = [];
+    riverMap = [];
+    ferryMap = Array.from({ length: SIZE }, () => new Int8Array(SIZE).fill(0));
+    const seed = Math.random() * 1000, seed2 = Math.random() * 1000, seed3 = Math.random() * 1000;
+
+    // --- 步骤 1: 生成高度图 ---
+    let minH = Infinity, maxH = -Infinity;
+
+    for (let x = 0; x < SIZE; x++) {
+        heightMap[x] = [];
+        riverMap[x] = [];
+        for (let y = 0; y < SIZE; y++) {
+            let nx = x + getBaseTerrain(x,y,seed2,0.06) * 5, ny = y + getBaseTerrain(x,y,seed3,0.06) * 5;
+            riverMap[x][y] = 0;
+
+            // 1. 柏林噪声作为基础起伏
+            let base = getBaseTerrain(nx, ny, seed); // -1 到 1
+            base = (base + 1) / 2; // 归一化 0-1
+
+            base *= 0.8; // 基础地形更平滑
+
+            // 2. FBM 生成山脊细节
+            let ridges = getRidgeNoise(nx, ny, seed + 500); // 0-1 (因为用了abs)
+            
+            // 3. 叠加：基础地形占 70%，山脊细节占 30%，且山脊只在高处显著
+            // 使用幂函数让平原更平，山峰更陡
+            let h = base * 0.7 + ridges * 0.3;
+            
+            // 增加一点指数让低地更平
+            h = Math.pow(h, 1.2 - h * h);
+
+            heightMap[x][y] = h;
+            
+            if (h < minH) minH = h;
+            if (h > maxH) maxH = h;
+        }
+    }
+
+    // 再次归一化到 0-1 方便后续计算
+    for (let x = 0; x < SIZE; x++) {
+        for (let y = 0; y < SIZE; y++) {
+            heightMap[x][y] = (heightMap[x][y] - minH) / (maxH - minH);
+        }
+    }
+
+    // --- 步骤 2: 生成河流 (A*) ---
+    generateRivers();
+	
+    // --- 步骤 3：人烟 ---
+    generateSettlements();
+    // --- 步骤 4: 渲染 ---
+    drawMap();
+}
+
+/**
+ * ------------------------------------------------------------------
+ * 4. 河流生成 (A* 算法)
+ * ------------------------------------------------------------------
+ */
+
+function findMountainSource() {
+    const mountainSources = [];
+    const threshold = 0.5; // 只有海拔高于 0.5 的地方才考虑作为山头
+    const minXY = 0;//Math.floor(SIZE / 4);
+    const maxXY = SIZE;//SIZE - minXY;
+    for (let x = minXY; x < maxXY; x++) {
+        for (let y = minXY; y < maxXY; y++) {
+            const currentH = heightMap[x][y];
+
+            // 基础高度过滤
+            if (currentH < threshold) continue;
+
+            let isPeak = true;
+            // 检查周围 3x3 邻居
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    if (dx === 0 && dy === 0) continue;
+                    // 如果任何一个邻居比当前点高，它就不是山顶
+                    if (x+dx>=0&&x+dx<SIZE&&y+dy>=0&&y+dy<SIZE&&heightMap[x + dx][y + dy] > currentH) {
+                        isPeak = false;
+                        break;
+                    }
+                }
+                if (!isPeak) break;
+            }
+
+            if (isPeak) {
+                mountainSources.push({ x:x, y:y, height: currentH });
+            }
+        }
+    }
+
+   // 1. 先按高度严格降序排列
+    mountainSources.sort((a, b) => b.height - a.height);
+
+    // 2. 半随机策略：
+    // 我们定义前 30% 为“名山大川”的种子点。
+    // 我们只打乱这前 30% 的顺序，保证大河一定从高处出，但具体哪座高山出是随机的。
+    const topPercentage = 0.3;
+    const topCount = Math.floor(mountainSources.length * topPercentage);
+    
+    // Fisher-Yates 洗牌算法仅作用于头部区间
+    for (let i = topCount - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [mountainSources[i], mountainSources[j]] = [mountainSources[j], mountainSources[i]];
+    }
+
+    // 返回打乱了头部、但整体依然保留一定高度梯度的序列
+    return mountainSources;
+}
+function findLowBasins() {
+    const basins = [];
+    const minXY = 0;//Math.floor(SIZE / 4);
+    const maxXY = SIZE;//SIZE - minXY;
+
+    for (let x = minXY; x < maxXY; x++) {
+        for (let y = minXY; y < maxXY; y++) {
+            const h = heightMap[x][y];
+            if (h > 0.1) continue; // 只在低海拔地区找洼地
+
+            let isBottom = true;
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    if (x+dx>=0&&x+dx<SIZE&&y+dy>=0&&y+dy<SIZE&&heightMap[x + dx][y + dy] < h) {
+                        isBottom = false;
+                        break;
+                    }
+                }
+            }
+            if (isBottom) basins.push({ x, y });
+        }
+    }
+    return basins;
+}
+function generateRivers() {
+    let riversGenerated = 0;
+    let attempts = 0;
+    
+    const mountainTop = findMountainSource(); // 从山顶开始
+    const basins = findLowBasins(); // 低洼地
+    for (let i = 0; riversGenerated < RIVERS_COUNT && i < mountainTop.length; i++) {
+        // 起点：高处
+        let startX = mountainTop[i].x;
+        let startY = mountainTop[i].y;
+        // 终点：地图边缘
+        let endX, endY;
+	let type = 0; 
+        // 概率判定：70% 注入洼地，30% 流向边缘
+        if (Math.random() < 0.7 && basins.length > 0) {
+            const target = basins[Math.floor(Math.random() * basins.length)];
+            endX = target.x;
+            endY = target.y;
+        } else {
+            // 原有的边缘终点逻辑...
+            const edge = Math.floor(Math.random() * 4);
+            if (edge === 0) { endX = Math.floor(Math.random()*SIZE); endY = 0; }
+            else if (edge === 1) { endX = SIZE-1; endY = Math.floor(Math.random()*SIZE); }
+            else if (edge === 2) { endX = Math.floor(Math.random()*SIZE); endY = SIZE-1; }
+            else { endX = 0; endY = Math.floor(Math.random()*SIZE); }
+	    type = 1;
+        }
+
+        // 执行 A*
+        const path = findRiverPath(startX, startY, endX, endY);
+        
+        if (path && path.length > SIZE * 0.2 + type * SIZE * 0.5) {
+            // 标记河流
+	    path.forEach((p, i) => {
+                //riverMap[p.x][p.y] = 1;
+
+    // 获取当前点的动态半径
+    const radius = getRiverWidth(i, path.length, type, p.x, p.y);
+// 这里的逻辑：半径越宽，覆盖周围的概率和范围越大
+    const rInt = Math.ceil(radius); 
+    for (let dx = -rInt; dx <= rInt; dx++) {
+        for (let dy = -rInt; dy <= rInt; dy++) {
+            const nx = p.x + dx;
+            const ny = p.y + dy;
+            
+            if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
+                // 使用欧几里得距离来保证河道圆润
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist <= radius) {
+                    riverMap[nx][ny] = 1;
+                    // 还可以顺便降低河流中心的地形高度，模拟侵蚀
+                    heightMap[nx][ny] *= 0.8; 
+                }
+            }
+        }
+    }
+
+
+                // 可选：河流经过的地方稍微降低高度，形成河谷
+                heightMap[p.x][p.y] *= 0.8; 
+});
+            riversGenerated++;
+        }
+    }
+}
+// 计算路径上某一点的河流半径
+function getRiverWidth(pathIndex, pathLength, riverToEdge, x, y) {
+    // 1. 进度影响：从源头到终点线性增长
+    const minProgressWidth = 0.1,maxProgressWidth = 2.5 - riverToEdge * 0.5;
+    const progressBase = minProgressWidth + Math.min(1, 1 - pathIndex / pathLength) * (maxProgressWidth - minProgressWidth);
+
+    // 2. 坡度影响：计算周围 3x3 区域的最大高度差
+    let maxDiff = 0, riverCount = 0;
+    const currentH = heightMap[x][y];
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
+                maxDiff = Math.max(maxDiff, Math.abs(heightMap[nx][ny] - currentH));
+		if(riverMap[nx][ny] === 1) riverCount ++;
+            }
+        }
+    }
+
+    // 坡度越大（险峻），宽度缩减系数越小
+    // 如果 maxDiff 很高（如 0.2），则 widthFactor 接近 0.5
+    // 如果极为平坦，widthFactor 接近 1.2
+    const widthFactor = 1.2 - (maxDiff * 3.5) + riverCount * 0.05;
+    
+    return Math.max(0.5, progressBase * widthFactor);
+}
+
+// A* 节点结构
+class Node {
+    constructor(x, y, parent = null) {
+        this.x = x;
+        this.y = y;
+        this.parent = parent;
+        this.g = 0; // Cost from start
+        this.h = 0; // Heuristic to end
+        this.f = 0; // Total
+    }
+}
+
+function findRiverPath(startX, startY, endX, endY) {
+// 从start到end，但碰到边缘就中止
+    let openList = [];
+    let closedSet = new Set(); // 存储 "x,y" 字符串
+    
+    let startNode = new Node(startX, startY);
+    openList.push(startNode);
+
+    // 避免死循环的简单计数器
+    let loopCount = 0;
+    const maxLoops = SIZE * SIZE * 2; 
+
+    while (openList.length > 0) {
+        loopCount++;
+        if (loopCount > maxLoops) return null; // 路径太长或找不到
+
+        // 找到 f 最小的节点 (简单的线性查找，优化可用最小堆)
+        let lowestIndex = 0;
+        for (let i = 1; i < openList.length; i++) {
+            if (openList[i].f < openList[lowestIndex].f) {
+                lowestIndex = i;
+            }
+        }
+        let current = openList[lowestIndex];
+
+        // 到达终点？ (接近边缘即可)
+        if (current.x == 0 && endX ===0 
+|| current.x == SIZE - 1 && endX === SIZE - 1 
+|| current.y == 0 && endY === 0 
+|| current.y == SIZE - 1 && endY === SIZE - 1 
+|| current.x === endX && current.y === endY) {
+            let path = [];
+            let temp = current;
+            while (temp) {
+                path.push({x: temp.x, y: temp.y});
+                temp = temp.parent;
+            }
+            return path;
+        }
+
+        // 移出 OpenList，加入 ClosedSet
+        openList.splice(lowestIndex, 1);
+        closedSet.add(`${current.x},${current.y}`);
+
+        // 邻居：上下左右
+        const neighbors = [
+            {x:0, y:-1}, {x:0, y:1}, {x:-1, y:0}, {x:1, y:0}
+        ];
+
+        for (let offset of neighbors) {
+            let nx = current.x + offset.x;
+            let ny = current.y + offset.y;
+
+            // 越界检查
+            if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) continue;
+            
+            // 已检查过
+            if (closedSet.has(`${nx},${ny}`)) continue;
+
+            // --- 核心逻辑：代价计算 ---
+            // 代价 = 高度^4 + 随机噪声
+            // 1. 高度惩罚：水往低处流，去高处代价极大
+            let hVal = heightMap[nx][ny];
+            let heightCost = Math.pow(hVal * 10, 4); // 放大并4次方，惩罚极重
+            
+            // 2. 随机噪声：增加 0~500 的随机代价，使河流产生随机摆动
+            let randomNoise = Math.random() * 500; 
+	    
+	    // 3. 水流惩罚：尽量避免和其它河道重合
+	    let riverCost = riverMap[nx][ny] * 5000;
+            let gScore = current.g + heightCost + randomNoise ;
+
+            // 检查该邻居是否已在 openList 中且有更好的路径
+            let existingNeighbor = openList.find(n => n.x === nx && n.y === ny);
+            if (existingNeighbor) {
+                if (gScore < existingNeighbor.g) {
+                    existingNeighbor.g = gScore;
+                    existingNeighbor.parent = current;
+                    existingNeighbor.f = existingNeighbor.g + existingNeighbor.h;
+                }
+            } else {
+                let neighbor = new Node(nx, ny, current);
+                neighbor.g = gScore;
+                // 启发式：曼哈顿距离
+                neighbor.h = (Math.abs(nx - endX) + Math.abs(ny - endY)) * 10; 
+                neighbor.f = neighbor.g + neighbor.h;
+                openList.push(neighbor);
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * ------------------------------------------------------------------
+ * 5. 渲染逻辑
+ * ------------------------------------------------------------------
+ */
+function drawMap() {
+    const canvas = document.getElementById('mapCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // 清空
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (let x = 0; x < SIZE; x++) {
+        for (let y = 0; y < SIZE; y++) {
+            let h = heightMap[x][y];
+            let isRiver = riverMap[x][y];
+
+            let color;
+            
+            if (isRiver) {
+                color = "rgb(0, 120, 255)"; // 河流蓝
+            } else {
+                // 根据高度定色
+                if (h < 0.6) {
+                    // 平原绿 (根据高度渐变)
+                    let g = Math.floor(Math.max(95, 100 + (h-0.35)*200));
+                    color = `rgb(50, ${g}, 50)`; 
+                }
+                else if (h < 0.8) {
+                    // 山体灰
+                    let l = Math.floor(100 + (h-0.6)*300);
+                    color = `rgb(${l}, ${l}, ${l})`;
+                }
+                else {
+                    // 雪顶
+                    color = "rgb(240, 240, 255)";
+                }
+            }
+
+            ctx.fillStyle = color;
+            ctx.fillRect(x * SCALE_FACTOR, y * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR);
+        }
+    }
+
+    if (Array.isArray(unitOwner) && unitOwner.length === SIZE) {
+        drawUnitOverlay(ctx);
+    }
+    // 人烟
+    drawSettlements(ctx);
+    if (showUnitPositions) drawUnitPositions(ctx);
+}
+/**
+ * ------------------------------------------------------------------
+ * 6. 定居点生成 (评分系统 + 泊松采样思想)
+ * ------------------------------------------------------------------
+ */
+let settlements = []; // 存放 {x, y, score}
+let settlementMap = []; // 标记某位置生成的定居点索引
+
+function generateSettlements() {
+    settlementMap = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(-1));
+    settlements = [];
+    const candidates = [];
+    const MIN_DISTANCE = 4; // 泊松采样排斥半径：定居点之间至少隔4格
+    // 1. 遍历地图计算每个点的“定居点适宜度”
+    for (let x = 2; x < SIZE - 2; x++) {
+        for (let y = 2; y < SIZE - 2; y++) {
+            const h = heightMap[x][y];
+            
+            // 基础过滤：不在水里(h<0.3)，不在河道内(riverMap)，不在高山(h>0.75)
+            if (h < 0.3 || h > 0.75 || riverMap[x][y] === 1) continue;
+
+            // 计算水源亲和力 (5*5范围内是否有河流)
+            let waterScore = 0;
+            for (let dx = -2; dx <= 2; dx++) {
+                for (let dy = -2; dy <= 2; dy++) {
+                    if (x+dx>=0&&x+dx<SIZE&&y+dy>=0&&y+dy<SIZE&&riverMap[x + dx][y + dy] === 1) {
+                        waterScore = 50; // 发现水源，大幅加分
+                        break;
+                    }
+                }
+            }
+
+            // 综合评分：平原得分高 + 水源加分 - 随机扰动(增加多样性)
+            const fitness = (1 - h) * 50 + waterScore + Math.random() * 10;
+            candidates.push({ x, y, score: fitness });
+        }
+    }
+
+    // 2. 按分数从高到低排序 (优先占领风水宝地)
+    candidates.sort((a, b) => b.score - a.score);
+    const topPercentage = 0.2;
+    const topCount = Math.floor(candidates.length * topPercentage);
+    
+    // Fisher-Yates 洗牌算法仅作用于头部区间
+    for (let i = topCount - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+    }
+
+
+    // 3. 泊松采样排斥检查
+    for (let cand of candidates) {
+        if (settlements.length >= DESIRED_SETTLEMENTS) break;
+
+        // 检查是否与已有的定居点太近
+        let tooClose = false;
+        for (let s of settlements) {
+            const dist = Math.hypot(cand.x - s.x, cand.y - s.y);
+            if (dist < MIN_DISTANCE) {
+                tooClose = true;
+                break;
+            }
+        }
+
+        if (!tooClose) {
+            settlements.push({ x: cand.x, y: cand.y, score: cand.score, faction: -1, stability: 60, garrison: 25, prod: 0, spawnCount: 0 });
+            settlementMap[cand.x][cand.y] = settlements.length - 1; // 标记为已生成，索引为数组长度-1，因为数组从0开始计数
+        }
+    }
+    for (let x = 0; x < SIZE; x++) {
+        if (!ferryMap[x]) ferryMap[x] = new Int8Array(SIZE).fill(0);
+        else ferryMap[x].fill(0);
+    }
+    for (let i = 0; i < settlements.length; i++) {
+        const s = settlements[i];
+        const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+        let isFerry = 0;
+        for (let k = 0; k < dirs.length; k++) {
+            const nx = s.x + dirs[k].x, ny = s.y + dirs[k].y;
+            if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE && riverMap[nx][ny] === 1) { isFerry = 1; break; }
+        }
+        if (isFerry) ferryMap[s.x][s.y] = 1;
+    }
+}
+// 在 drawMap() 的最后面添加
+function drawSettlements(ctx) {
+    settlements.forEach(s => {
+        let color = NEUTRAL_COLOR;
+        if (s.faction > 0) color = COLORS[(s.faction - 1) % COLORS.length];
+        let outlineColor = "#000";
+        if (ferryMap[s.x] && ferryMap[s.x][s.y] === 1) { outlineColor = 'gold'; color = 'gold'; }
+        const px = s.x * SCALE_FACTOR;
+        const py = s.y * SCALE_FACTOR;
+        const size = SCALE_FACTOR * 1.2;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = outlineColor;
+        ctx.lineWidth = 1;
+        ctx.fillRect(px, py, size, size);
+        ctx.strokeRect(px, py, size, size);
+    });
+}
+// 初始化运行
+generateWorld();
+
+function initFactions() {
+    unitOwner = Array.from({ length: SIZE }, () => new Int16Array(SIZE).fill(-1));
+    unitStrength = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
+    const initialFactions = Math.floor(SIZE * 0.1);
+    COLORS = generateDistinctColors(initialFactions);
+    factions = Array.from({ length: initialFactions }, (_, i) => ({ id: i + 1, color: COLORS[i] }));
+    const shuffled = [...settlements].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < settlements.length; i++) {
+        settlements[i].faction = 0;
+        settlements[i].stability = settlements[i].stability ?? 60;
+        settlements[i].garrison = settlements[i].garrison ?? 25;
+        settlements[i].prod = settlements[i].prod ?? 0;
+        settlements[i].spawnCount = settlements[i].spawnCount ?? 0;
+    }
+    const target = Math.min(initialFactions, shuffled.length);
+    const chosen = [];
+    let r = Math.max(4, Math.floor(SIZE * 0.08));
+    while (chosen.length < target && r >= 4) {
+        for (let c of shuffled) {
+            if (chosen.length >= target) break;
+            let ok = true;
+            for (let s of chosen) {
+                if (Math.hypot(c.x - s.x, c.y - s.y) < r) { ok = false; break; }
+            }
+            if (ok) chosen.push(c);
+        }
+        if (chosen.length < target) {
+            r -= 2;
+        }
+    }
+    if (chosen.length < target) {
+        for (let c of shuffled) {
+            if (chosen.length >= target) break;
+            if (!chosen.includes(c)) chosen.push(c);
+        }
+    }
+    const assignCount = chosen.length;
+    for (let i = 0; i < assignCount; i++) {
+        chosen[i].faction = i + 1;
+        chosen[i].stability = 80;
+        chosen[i].garrison = 30;
+        chosen[i].prod = 0;
+        unitOwner[chosen[i].x][chosen[i].y] = chosen[i].faction;
+    }
+}
+
+class Unit {
+    constructor(x, y, faction) {
+        this.x = x;
+        this.y = y;
+        this.faction = faction;
+        this.health = 70;
+        this.morale = 100;
+        this.supply = 100;
+        this.factionLastBetray = -1; // 本单位所在阵营中的其他单位上次背叛到的阵营ID
+        this.maxWaveDis = 0; // 本单位历史上接收过的波的距离的最大值
+    }
+}
+
+function nearestFriendlyDistance(u) {
+    let best = Infinity;
+    for (const s of settlements) {
+        if (s.faction === u.faction) {
+            const d = Math.abs(s.x - u.x) + Math.abs(s.y - u.y);
+            if (d < best) best = d;
+        }
+    }
+    return best === Infinity ? SIZE : best;
+}
+
+function chooseMove(u) {
+    const opts = [
+        { x: u.x + 1, y: u.y },
+        { x: u.x - 1, y: u.y },
+        { x: u.x, y: u.y + 1 },
+        { x: u.x, y: u.y - 1 }
+    ];
+    const rates = [];
+    for (const o of opts) {
+        if (o.x < 0 || o.x >= SIZE || o.y < 0 || o.y >= SIZE) { rates.push(0); continue; }
+        let r = 1;
+        if (riverMap[o.x][o.y] === 1) r *= 0.3;
+        if (heightMap[u.x][u.y] > 0.5 && heightMap[o.x][o.y] < heightMap[u.x][u.y]) r *= 1.5;
+        if (heightMap[u.x][u.y] > 0.8 && heightMap[o.x][o.y] < heightMap[u.x][u.y]) r *= 3;
+
+        const s = settlements.find(ss => ss.x === o.x && ss.y === o.y);
+        if (s) {
+            if(s.faction > 0 && s.faction === u.faction) r *= 1.2;
+            else if(s.faction === 0) r *= 1.8;
+        }
+        else if (unitOwner[o.x][o.y] !== u.faction) r *= 1.2;
+        let enemySum = 0;
+        for (const v of units) {
+            if (v.faction !== u.faction && Math.abs(v.x - o.x) + Math.abs(v.y - o.y) <= coverRadius(u)) enemySum += v.health;
+        }
+        if (enemySum > u.health * 2) r *= 0.4;
+        if (Array.isArray(waveOwner) && waveOwner.length === SIZE && unitOwner[o.x][o.y] === u.faction && unitOwner[u.x][u.y] === u.faction) { // 单位靠近/远离波衰减的方向移动
+            if (waveStrength[o.x][o.y] > waveStrength[u.x][u.y]) {
+                // 高士气倾向于靠近
+                if(u.morale > 30) r *= 10;
+                else r *= 0.1;
+            }
+            else {
+                if(u.morale > 30) r *= 0.1;
+                else r *= 10;
+            }
+        }
+        rates.push(r);
+    }
+    const sum = rates.reduce((a, b) => a + b, 0);
+    if (sum <= 0) return u;
+    let pick = Math.random() * sum, acc = 0;
+    for (let i = 0; i < opts.length; i++) {
+        acc += rates[i];
+        if (pick <= acc) return opts[i];
+    }
+    return opts[0];
+}
+function coverRadius(u) { //单位覆盖地区的半径
+    let r = Math.max(1, Math.floor(u.health / 20));
+    // 坡度影响：计算周围 3x3 区域的最大高度差
+    let maxDiff = 0, riverCount = 0, mountCount = 0;
+    const currentH = heightMap[u.x][u.y];
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            const nx = u.x + dx, ny = u.y + dy;
+            if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
+                maxDiff = Math.max(maxDiff, Math.abs(heightMap[nx][ny] - currentH));
+		if(riverMap[nx][ny] === 1) riverCount ++;
+		if(heightMap[nx][ny] > 0.6) mountCount ++;
+            }
+        }
+    }
+    // 坡度越大（险峻），涂色宽度缩减系数越小
+    // 如果 maxDiff 很高（如 0.2），则 widthFactor 接近 0
+    // 如果极为平坦，widthFactor 接近 1.2
+   // 如果有高山/河流，涂色宽度减少
+    const widthFactor = Math.max(0.1, 1.2 - (maxDiff * 3.5) - mountCount * 0.1 - riverCount * 0.05);
+    return Math.floor(r * widthFactor);
+}
+function paintByUnit(u) {
+    const r = coverRadius(u);
+    const rInt = r;
+    
+    for (let dx = -rInt; dx <= rInt; dx++) {
+        for (let dy = -rInt; dy <= rInt; dy++) {
+            const nx = u.x + dx, ny = u.y + dy;
+            if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist <= r) {
+                if (u.health > unitStrength[nx][ny]) {
+                    const oldFaction = unitOwner[nx][ny];
+                    unitStrength[nx][ny] = u.health;
+                    unitOwner[nx][ny] = u.faction;
+                        
+                    if (settlementMap[nx][ny] !== -1) { // 如果有定居点
+                        const s = settlements[settlementMap[nx][ny]];
+                        if (oldFaction !== u.faction) { // 如果定居点阵营改变
+                            if(oldFaction == -1 || u.morale == 100) s.spawnCount = Math.max(0, (s.spawnCount || 0) - 4);
+                            if(u.maxWaveDis < SIZE * 0.2) s.spawnCount = Math.max(0, (s.spawnCount || 0) - 1);
+                            else s.spawnCount = Math.max(0, (s.spawnCount || 0) + 1);
+                            // 如果单位远道而来，定居点产兵速率下降
+                        }
+                        s.faction = u.faction;
+                    }   
+                }
+                else if(unitOwner[nx][ny] !== u.faction) {
+                    unitStrength[nx][ny] = Math.max(0, unitStrength[nx][ny] - STRENGTH_DECAY);
+                    
+                }
+            }
+        }
+    }
+}
+
+function attackByUnit(u) {
+    const r = coverRadius(u);
+    let target = null;
+    for (const v of units) {
+        if (v !== u && v.faction !== u.faction) {
+            const dist = Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y));
+            if (dist <= r) {
+                if (!target || v.health > target.health) target = v;
+            }
+        }
+    }
+    if (target) {
+        target.health -= 0.01 * u.morale;
+        //u.health -= 1;
+        if(u.health > 0) emitWave(target.x, target.y, u.health * 1);
+    }
+}
+
+function getNewFaction(u, betrayProb) {
+    let newFaction = Math.floor(Math.random() * COLORS.length) + 1;
+    if (u.factionLastBetray > 0 && Math.random() < betrayProb) newFaction = u.factionLastBetray; // 有 betrayProb 概率背叛到上一个本阵营单位背叛的阵营，导致本阵营单位倾向于一起叛变
+    return newFaction;
+}
+
+function updateMorale(u) {
+    const r = coverRadius(u);
+    const rInt = r;
+    /*
+    const d = nearestFriendlyDistance(u);
+    if(d < 2)
+        u.morale -= 0.5;
+    if(d > 15 && d < SIZE)
+        u.morale += 0.5;*/
+    for (let dx = -rInt; dx <= rInt; dx++) {
+        for (let dy = -rInt; dy <= rInt; dy++) {
+            const nx = u.x + dx, ny = u.y + dy;
+            if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist <= r) {
+                if (unitOwner[nx][ny] !== u.faction) u.morale = Math.min(100, u.morale + 0.01);
+            }
+        }
+    }
+    if (unitOwner[u.x][u.y] === u.faction) {
+        const dis = waveDis && waveDis[u.x] ? waveDis[u.x][u.y] : Infinity;
+        if (Number.isFinite(dis) && dis > u.maxWaveDis) u.maxWaveDis = dis;  
+        u.morale -= 0.0005 * u.maxWaveDis;
+    }
+    /*
+    let enemySum = 0, friendSum = 0, crowded = 0;
+    for (const v of units) { // 计算敌人总健康值*士气
+        if (v.faction !== u.faction && Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y)) <= 4) enemySum += v.health * v.morale;
+        if (v.faction === u.faction && Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y)) <= 4) friendSum += v.health * v.morale;
+	    if (v.faction === u.faction && v.x === u.x && v.y === u.y && v) crowded += 1;
+    }
+    //if (crowded > 2) u.morale --;
+    if (enemySum > 4 * friendSum) u.morale -= 5;*/
+    if (u.morale <= 0) {
+        u.morale = 0;
+        const prevFaction = u.faction;
+        const newFaction = getNewFaction(u, 0.8);
+        if (newFaction !== prevFaction) {
+            u.faction = newFaction;
+            //const betrayInfluenceMoraleType = (Math.random() > 0.01 * units.length) ? '振奋' : '崩溃';
+	    //const betrayInfluenceMoraleType = (newFaction !== u.factionLastBetray) ? '无' : '崩溃';
+            if(Math.random() < 0.002){ // 每个单位有0.2%的概率因为叛变引发黑天鹅事件
+                for (const w of units) {
+                    if (w !== u && w.faction === prevFaction) {
+                        w.factionLastBetray = newFaction; // 其他单位收到本单位背叛到的阵营ID
+                        const d = Math.abs(w.x - u.x) + Math.abs(w.y - u.y);
+                        const decay = 60;
+                        if(d > decay) continue;
+                        w.morale = 100;
+                        w.faction = getNewFaction(w, 0.0);// 黑天鹅事件: 有0%的概率背叛到上一个本阵营单位背叛的阵营——导致本阵营单位倾向于随机叛变，天下大乱
+                        w.health = Math.max(u.health * 0.5, w.health);
+                    }
+                }
+
+            }
+            u.morale = 100;
+            u.maxWaveDis = 0;// 重置最大波距离，因为本单位背叛到新的阵营
+        }
+    }
+    if(u.morale > 100) u.morale = 100;
+}
+function supplyInfluenceHealth(u) {
+    let supplySum = 0;
+    for (const s of settlements) {
+        let dis = Math.max(Math.abs(s.x - u.x), Math.abs(s.y - u.y));
+        if (s.faction === u.faction) {
+            supplySum += coverRadius(u) / dis;
+        }
+    }
+    if (supplySum >= 1) u.supply += supplySum;
+    else if(supplySum < 0.2) u.supply -= 0.01 * u.health;
+
+    if(u.supply < 0) u.supply = 0;
+    if(u.supply > 100) u.supply = 100;
+    
+    if(u.supply == 0) u.health *= 0.9;
+    if(u.supply > u.health) u.health += 0.01;
+}
+function updateUnits() {
+    if (typeof Unit !== 'function') return;
+    if (!Array.isArray(unitOwner) || unitOwner.length !== SIZE) {
+        unitOwner = Array.from({ length: SIZE }, () => new Int16Array(SIZE).fill(-1));
+        unitStrength = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
+    }
+    if (!Array.isArray(waveOwner) || waveOwner.length !== SIZE) {
+        waveOwner = Array.from({ length: SIZE }, () => new Int16Array(SIZE).fill(-1));
+        waveStrength = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
+    }
+    for (const s of settlements) {
+        s.prod += s.score * 0.02;
+        const sc = s.spawnCount || 0;
+        const threshold = 400 * Math.pow(2, sc);
+        if (s.faction > 0 && s.prod >= threshold) {
+            units.push(new Unit(s.x, s.y, s.faction));
+            s.prod -= threshold;
+            s.spawnCount = sc + 1;
+        }
+    }
+    for (let i = 0; i < units.length; i++) {
+        const u = units[i];
+        let enemySumLocal = 0;
+        /*for (const v of units) {
+            if (v.faction !== u.faction && Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y)) <= coverRadius) enemySumLocal += v.health;
+        }
+        if (enemySumLocal > u.health) */
+        const move = chooseMove(u);
+        u.x = move.x;
+        u.y = move.y;
+
+        paintByUnit(u);
+        
+        attackByUnit(u);
+        updateMorale(u);
+        supplyInfluenceHealth(u);
+        if (u.health <= 1) {
+            units.splice(i, 1);
+            i--;
+        }
+    }
+    
+    for (let x = 0; x < SIZE; x++) {
+        for (let y = 0; y < SIZE; y++) {
+            if (unitStrength[x][y] > 0) {
+                unitStrength[x][y] = Math.max(0, unitStrength[x][y] - STRENGTH_DECAY);
+                if (unitStrength[x][y] === 0) unitOwner[x][y] = -1;
+            }
+        }
+    }
+    propagateWaves();
+    updateLeaderboards();
+}
+
+function drawUnitOverlay(ctx) { // 绘制单位覆盖层（领土）
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+    if (!Array.isArray(unitOwner) || unitOwner.length !== SIZE) {
+        ctx.restore();
+        return;
+    }
+    for (let x = 0; x < SIZE; x++) {
+        const row = unitOwner[x];
+        if (!row) continue;
+        for (let y = 0; y < SIZE; y++) {
+            const fid = row[y];
+            if (fid > 0 && !riverMap[x][y]) { // 只绘制非河流区域的领土
+                const strength = unitStrength[x][y] || 0;
+                const alpha = Math.max(0, Math.min(0.8, Math.log2(strength + 1) * 0.2));
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = COLORS[(fid - 1) % COLORS.length];
+                ctx.fillRect(x * SCALE_FACTOR, y * SCALE_FACTOR, SCALE_FACTOR, SCALE_FACTOR);
+            }
+        }
+    }
+    ctx.restore();
+}
+function emitWave(x, y, intensity) {
+    const cur = waveStrength[x][y] || 0;
+    const fid = unitOwner[x][y];
+    if (intensity > cur && unitOwner[x][y] === fid && !riverMap[x][y]) { // 只允许己方单位在己方领土发射波
+        waveSources.push({ x, y, intensity, faction: fid });
+    }
+    //console.log("wave emitted at", x, y, "intensity", intensity);
+}
+function spreadCost(nx, ny, x, y) {
+    const dh = Math.max(0, heightMap[nx][ny] - heightMap[x][y]);
+    const curRiver = riverMap[x][y] === 1;
+    const nextRiver = riverMap[nx][ny] === 1;
+    let cost = 5;
+    if (curRiver !== nextRiver) {
+        const ferry = (ferryMap[x] && ferryMap[x][y] === 1) || (ferryMap[nx] && ferryMap[nx][ny] === 1);
+        if(ferry) cost -= 4.5; // 河流-非河流成本
+        else cost += 20;
+    } else if (nextRiver) {
+        cost -= 4.5; // 跨河流成本
+    } else {
+        cost += dh * 5; // 非河流区域，高度差成本
+    }
+    return cost;
+}
+
+function propagateWaves() {
+    if (!Array.isArray(unitOwner) || unitOwner.length !== SIZE) return;
+    if (!Array.isArray(waveDis) || waveDis.length !== SIZE) {
+        waveDis = Array.from({ length: SIZE }, () => new Float32Array(SIZE));
+    }
+    for (let x = 0; x < SIZE; x++) {
+        const row = waveDis[x];
+        for (let y = 0; y < SIZE; y++) {
+            row[y] = Infinity;
+        }
+    }
+    for (let x = 0; x < SIZE; x++) {
+        for (let y = 0; y < SIZE; y++) {
+            waveStrength[x][y] -= WAVE_DECAY;
+            if (waveStrength[x][y] <= WAVE_FADE_THRESHOLD) {
+                waveOwner[x][y] = -1;
+                waveStrength[x][y] = 0;
+            }
+        }
+    }
+    const queue = [];
+    for (const src of waveSources) {
+        const { x, y, intensity, faction } = src;
+        if (unitOwner[x][y] !== faction) continue;
+        if (intensity > waveStrength[x][y]) { 
+            waveStrength[x][y] = intensity;
+            waveOwner[x][y] = faction;
+            waveDis[x][y] = 0;
+            queue.push({ x, y });
+        }
+    }
+    while (queue.length) {
+        const cur = queue.shift();
+        const s = waveStrength[cur.x][cur.y];
+        const f = waveOwner[cur.x][cur.y];
+        const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+        for (const d of dirs) {
+            const nx = cur.x + d.x, ny = cur.y + d.y;
+            if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+            if (unitOwner[nx][ny] !== f) continue;
+            const ns = s - spreadCost(nx, ny, cur.x, cur.y);
+            const nd = waveDis[cur.x][cur.y] + 1;
+            if (ns > waveStrength[nx][ny]) {
+                waveStrength[nx][ny] = ns;
+                waveOwner[nx][ny] = f;
+                waveDis[nx][ny] = nd;
+                if (ns > 1) queue.push({ x: nx, y: ny });
+            }
+        }
+    }
+    waveSources = [];
+}
+
+function renderLeaderboard(containerId, arr) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.innerHTML = arr.map(item => {
+        const color = COLORS[(item.id - 1) % COLORS.length];
+        return `<div style="display:flex;align-items:center;gap:6px;">
+            <span style="width:12px;height:12px;background:${color};display:inline-block;border:1px solid #000"></span>
+            <span>阵营${item.id}</span>
+            <span style="margin-left:auto">${item.count}</span>
+        </div>`;
+    }).join('');
+}
+
+function updateLeaderboards() {
+    const unitCounts = new Map();
+    for (const u of units) {
+        unitCounts.set(u.faction, (unitCounts.get(u.faction) || 0) + 1);
+    }
+    const cellCounts = new Map();
+    if (Array.isArray(unitOwner) && unitOwner.length === SIZE) {
+        for (let x = 0; x < SIZE; x++) {
+            const row = unitOwner[x];
+            for (let y = 0; y < SIZE; y++) {
+                const f = row[y];
+                if (f > 0) cellCounts.set(f, (cellCounts.get(f) || 0) + 1);
+            }
+        }
+    }
+    const ids = factions.map(f => f.id).filter(id => id > 0);
+    const unitSorted = ids.map(id => ({ id, count: unitCounts.get(id) || 0 })).sort((a, b) => b.count - a.count);
+    const cellSorted = ids.map(id => ({ id, count: cellCounts.get(id) || 0 })).sort((a, b) => b.count - a.count);
+    renderLeaderboard('unitLeaderboard', unitSorted);
+    renderLeaderboard('cellLeaderboard', cellSorted);
+}
+
+function unitLoop() {
+    updateUnits();
+    drawMap();
+    worldTime += 1;
+    simulationTimer = requestAnimationFrame(unitLoop);
+}
+
+function startUnitSimulation() {
+    initFactions();
+    units = [];
+    worldTime = 0;
+    cancelAnimationFrame(simulationTimer);
+    waveOwner = Array.from({ length: SIZE }, () => new Int16Array(SIZE).fill(-1));
+    waveStrength = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
+    waveSources = [];
+    simulationTimer = requestAnimationFrame(unitLoop);
+}
+function toggleUnitPositions() {
+    showUnitPositions = !showUnitPositions;
+    const btn = document.getElementById('toggleUnitsBtn');
+    if (btn) btn.textContent = showUnitPositions ? '隐藏单位位置' : '显示单位位置';
+}
+function drawUnitPositions(ctx) {
+    for (const u of units) {
+        const color = COLORS[(u.faction - 1) % COLORS.length];
+        ctx.fillStyle = color;
+        ctx.strokeStyle = '#000';
+        const r = Math.max(2, Math.floor(SCALE_FACTOR / 3));
+        const cx = u.x * SCALE_FACTOR + SCALE_FACTOR / 2;
+        const cy = u.y * SCALE_FACTOR + SCALE_FACTOR / 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+    }
+}
+</script>
+</body>
+</html>
