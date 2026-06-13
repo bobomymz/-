@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -46,6 +47,38 @@
             font-size: 0.9em;
             color: #aaa;
         }
+        #settlementTooltip {
+            position: fixed;
+            display: none;
+            min-width: 180px;
+            padding: 8px 10px;
+            background: rgba(20, 20, 20, 0.92);
+            color: #eee;
+            border: 1px solid #666;
+            border-radius: 6px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+            pointer-events: none;
+            font-size: 12px;
+            line-height: 1.5;
+            z-index: 10;
+            white-space: nowrap;
+        }
+        #unitTooltip {
+            position: fixed;
+            display: none;
+            min-width: 180px;
+            padding: 8px 10px;
+            background: rgba(20, 20, 20, 0.92);
+            color: #eee;
+            border: 1px solid #666;
+            border-radius: 6px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.35);
+            pointer-events: none;
+            font-size: 12px;
+            line-height: 1.5;
+            z-index: 11;
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -56,6 +89,8 @@
         <button onclick="generateWorld()">重新生成地图</button>
         <button onclick="startUnitSimulation()">开始战争模拟</button>
         <button id="toggleUnitsBtn" onclick="toggleUnitPositions()">显示单位位置</button>
+        <button id="toggleRoadsBtn" onclick="toggleRoads()">隐藏道路</button>
+        <button id="toggleParentArrowsBtn" onclick="toggleParentArrows()">显示父‑子箭头</button>
     </div>
 
     <canvas id="mapCanvas" width="600" height="600"></canvas>
@@ -73,6 +108,8 @@
             <div id="cellLeaderboard"></div>
         </div>
     </div>
+    <div id="settlementTooltip"></div>
+    <div id="unitTooltip"></div>
 
 <script>
 /**
@@ -110,14 +147,30 @@ function perlin(x, y) {
 const SIZE = 200;
 const CANVAS_SIZE = 600; // 渲染尺寸
 const SCALE_FACTOR = CANVAS_SIZE / SIZE; // 放大倍数
-let RIVERS_COUNT = Math.floor(SIZE * 0.07);
+let RIVERS_COUNT = Math.floor(SIZE * 0.05);
 let DESIRED_SETTLEMENTS = Math.floor(SIZE * SIZE / 200);
+let FACTION_COUNT = Math.floor(SIZE * 0.2);
+let initialFactions = Math.floor(SIZE * 0.15);
+const FACTION_LABEL_UPDATE_INTERVAL = 15;
+const FACTION_MIN_AREA_FOR_LABEL = 200;
+const FACTION_MAX_LABELS_PER_FACTION = 3;
+const FACTION_LABEL_MIN_FONT_SIZE = 12;
+const FACTION_LABEL_MAX_FONT_SIZE = 32;
+const FACTION_LABEL_BASE_FONT_SIZE = 14;
+const FACTION_LABEL_FONT_SCALE = 0.5;
+const FACTION_LABEL_ALPHA = 0.6;
+const FACTION_LABEL_STROKE_ALPHA = 0.3;
+const LABEL_ROTATION_ENABLED = true;
+const LABEL_MIN_CELLS_FOR_PCA = 5;
+const LABEL_PROJECTION_SPAN_WEIGHT = 0.5;
+const LABEL_STROKE_LINE_WIDTH_RATIO = 0.15;
 
 // 存储地图数据
 let heightMap = []; // 2D 数组
 let riverMap = [];  // 2D 数组 (0:无, 1:有河流)
 let COLORS = [];
-const STRENGTH_DECAY = 0.1;
+const STRENGTH_DECAY = 0.01;
+const TILES_FOR_SETTLE = 60;
 const NEUTRAL_COLOR = '#888888';
 let factions = [];
 let units = [];
@@ -127,11 +180,33 @@ let unitOwner = [];
 let unitStrength = [];
 const WAVE_DECAY = 5;
 const WAVE_FADE_THRESHOLD = 1;
-let waveOwner = [];
+let waveOwner = []; // 波源单位阵营
 let waveStrength = [];
 let waveDis = [];
+let waveFrom = []; // 波源单位
 let showUnitPositions = false;
+let showRoads = true;
+let showParentArrows = false;   // 控制是否绘制父‑子箭头
 let ferryMap = [];
+let settlementMap = [];
+let settlementScores = [];
+let road = [];
+let hoveredSettlement = null;
+let hoveredSettlementScreenX = 0;
+let hoveredSettlementScreenY = 0;
+let hoveredUnit = null;
+let factionAreas = [];
+let territoryLabelFrameCounter = 0;
+const FACTION_NAME_POOL = [
+    '罗马', '波斯', '蒙古', '奥斯曼', '拜占庭', '神圣罗马', '大英', '西班牙', '葡萄牙', '阿兹特克',
+    '印加', '莫卧儿', '大清', '俄罗斯', '法兰克', '英格兰', '苏格兰', '波兰', '普鲁士', '巴伐利亚',
+    '瑞典', '丹麦', '萨丁', '两西西里', '摩洛哥', '暹罗', '威尼斯', '热那亚', '荷兰', '瑞士',
+    '美利坚', '雅典', '斯巴达', '马其顿', '迦太基', '巴比伦', '亚述', '埃及', '赫梯', '以色列',
+    '腓尼基', '突厥', '匈奴', '鲜卑', '契丹', '女真', '金帐', '察合台', '帖木儿', '唐',
+    '宋', '明', '汉', '晋', '隋', '辽', '金', '元', '夏', '商',
+    '周', '秦', '吴', '蜀', '魏', '高卢', '诺曼', '勃艮第', '基辅罗斯', '新罗',
+    '百济', '高句丽', '占城', '扶南', '安息', '塞琉古', '米底', '努米底亚', '玛雅', '德里苏丹'
+];
 
 function generateDistinctColors(count) {
     const colors = [];
@@ -140,6 +215,250 @@ function generateDistinctColors(count) {
         colors.push(`hsl(${hue}, 80%, 55%)`);
     }
     return colors.sort(() => Math.random() - 0.5);
+}
+
+function randomRange(min, max) {
+    return min + Math.random() * (max - min);
+}
+
+function shuffleArray(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+function getFactionName(factionId) {
+    if (factionId <= 0) return '中立';
+    return factions[factionId - 1]?.name || `阵营${factionId}`;
+}
+
+function getFactionDisplayName(factionId) {
+    if (factionId <= 0) return '中立';
+    return `${getFactionName(factionId)}（${factionId}）`;
+}
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+function getColorWithAlpha(color, alpha) {
+    if (!color) return `rgba(255, 255, 255, ${alpha})`;
+    if (color.startsWith('hsl(')) return color.replace('hsl(', 'hsla(').replace(')', `, ${alpha})`);
+    if (color.startsWith('rgb(')) return color.replace('rgb(', 'rgba(').replace(')', `, ${alpha})`);
+    if (color.startsWith('#')) {
+        const hex = color.slice(1);
+        if (hex.length === 6) {
+            const r = parseInt(hex.slice(0, 2), 16);
+            const g = parseInt(hex.slice(2, 4), 16);
+            const b = parseInt(hex.slice(4, 6), 16);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+    }
+    return color;
+}
+
+function normalizeLabelAngle(theta) {
+    while (theta > Math.PI / 2) theta -= Math.PI;
+    while (theta < -Math.PI / 2) theta += Math.PI;
+    return theta;
+}
+
+function getAreaPrincipalAxis(cells, centerX, centerY, width, height) {
+    const fallbackSpan = Math.max(width, height, 1);
+    if (!Array.isArray(cells) || cells.length < LABEL_MIN_CELLS_FOR_PCA) {
+        return { theta: 0, span: fallbackSpan };
+    }
+
+    let covXX = 0;
+    let covYY = 0;
+    let covXY = 0;
+    for (const cell of cells) {
+        const dx = cell.x + 0.5 - centerX;
+        const dy = cell.y + 0.5 - centerY;
+        covXX += dx * dx;
+        covYY += dy * dy;
+        covXY += dx * dy;
+    }
+    covXX /= cells.length;
+    covYY /= cells.length;
+    covXY /= cells.length;
+
+    const trace = covXX + covYY;
+    const determinant = covXX * covYY - covXY * covXY;
+    const discriminant = Math.max(0, trace * trace - 4 * determinant);
+    const sqrtDiscriminant = Math.sqrt(discriminant);
+    const eigenvalue1 = (trace + sqrtDiscriminant) / 2;
+    const eigenvalue2 = (trace - sqrtDiscriminant) / 2;
+    const principalValue = Math.max(eigenvalue1, eigenvalue2);
+
+    if (Math.abs(eigenvalue1 - eigenvalue2) < 1e-4) {
+        return { theta: 0, span: fallbackSpan };
+    }
+
+    let vx = covXY;
+    let vy = principalValue - covXX;
+    if (Math.abs(vx) + Math.abs(vy) < 1e-6) {
+        vx = principalValue - covYY;
+        vy = covXY;
+    }
+    const length = Math.hypot(vx, vy);
+    if (length < 1e-6) {
+        return { theta: 0, span: fallbackSpan };
+    }
+
+    vx /= length;
+    vy /= length;
+
+    let minProj = Infinity;
+    let maxProj = -Infinity;
+    for (const cell of cells) {
+        const dx = cell.x + 0.5 - centerX;
+        const dy = cell.y + 0.5 - centerY;
+        const projection = dx * vx + dy * vy;
+        if (projection < minProj) minProj = projection;
+        if (projection > maxProj) maxProj = projection;
+    }
+
+    return {
+        theta: normalizeLabelAngle(Math.atan2(vy, vx)),
+        span: Math.max(maxProj - minProj, fallbackSpan)
+    };
+}
+
+function getSettlementPopCap(settlement) { // 计算城市人口上限
+    return 10 * Math.log(1 + Math.max(0, settlement.resource)) + 1;
+}
+
+function getInitialHealth(settlement) {
+    const baseHealth = 70;
+    const healthPerTech = 30;
+    const techLevel = Math.max(1, Math.floor(settlement?.techLevel || 1));
+    return baseHealth + (techLevel - 1) * healthPerTech;
+}
+
+function findSettlementAt(x, y) {
+    if (!Array.isArray(settlementMap) || !settlementMap[x]) return null;
+    return settlementMap[x][y];
+}
+
+function getActiveSettlement(settlement) {
+    if (!settlement || settlement.isDestroyed) return null;
+    if (!Array.isArray(settlementMap) || !settlementMap[settlement.x]) return null;
+    return settlementMap[settlement.x][settlement.y] === settlement ? settlement : null;
+}
+
+function destroySettlement(settlement) {
+    const activeSettlement = getActiveSettlement(settlement);
+    if (!activeSettlement) return false;
+    if (settlementMap[activeSettlement.x]) settlementMap[activeSettlement.x][activeSettlement.y] = null;
+    if (ferryMap[activeSettlement.x]) ferryMap[activeSettlement.x][activeSettlement.y] = 0;
+    activeSettlement.isDestroyed = true;
+    const index = settlements.indexOf(activeSettlement);
+    if (index >= 0) settlements.splice(index, 1);
+    if (hoveredSettlement === activeSettlement) hideSettlementTooltip();
+    return true;
+}
+
+function findUnitAt(x, y) {
+    let best = null;
+    for (const u of units) {
+        if (u.x === x && u.y === y && !u.isDead) {
+            if (!best || u.health > best.health) best = u;
+        }
+    }
+    return best;
+}
+
+function updateSettlementTooltipPosition(screenX, screenY) {
+    const tooltip = document.getElementById('settlementTooltip');
+    if (!tooltip) return;
+    tooltip.style.left = `${screenX + 14}px`;
+    tooltip.style.top = `${screenY + 14}px`;
+}
+
+function updateUnitTooltipPosition(screenX, screenY) {
+    const tooltip = document.getElementById('unitTooltip');
+    if (!tooltip) return;
+    tooltip.style.left = `${screenX + 14}px`;
+    tooltip.style.top = `${screenY + 104}px`;
+}
+
+function renderSettlementTooltip(settlement) {
+    const tooltip = document.getElementById('settlementTooltip');
+    settlement = getActiveSettlement(settlement);
+    if (!tooltip || !settlement) {
+        if (tooltip) tooltip.style.display = 'none';
+        return;
+    }
+    const popCap = getSettlementPopCap(settlement);
+    const factionLabel = getFactionDisplayName(settlement.faction);
+    tooltip.innerHTML = [
+        `<strong>${factionLabel} 定居点</strong>`,
+        `资源: ${settlement.resource.toFixed(1)}`,
+        `预约资源: ${settlement.reservedResource.toFixed(1)}`,
+        `人口: ${settlement.population.toFixed(1)} / ${popCap.toFixed(1)}`,
+        `科技: ${settlement.techLevel}`,
+        `适宜度: ${settlement.score.toFixed(1)}`
+    ].join('<br>');
+    tooltip.style.display = 'block';
+    updateSettlementTooltipPosition(hoveredSettlementScreenX, hoveredSettlementScreenY);
+}
+
+function hideSettlementTooltip() {
+    hoveredSettlement = null;
+    const tooltip = document.getElementById('settlementTooltip');
+    if (tooltip) tooltip.style.display = 'none';
+}
+
+function renderUnitTooltip(unit) {
+    const tooltip = document.getElementById('unitTooltip');
+    if (!tooltip || !unit || unit.isDead || !units.includes(unit)) {
+        if (tooltip) tooltip.style.display = 'none';
+        return;
+    }
+    const birthSettlement = getActiveSettlement(unit.birthSettlement);
+    const maxHealth = birthSettlement ? getInitialHealth(birthSettlement) : unit.health;
+    tooltip.innerHTML = [
+        `<strong>${getFactionDisplayName(unit.faction)} 单位</strong>`,
+        `生命: ${unit.health.toFixed(1)} / ${maxHealth.toFixed(1)}`,
+        `士气: ${unit.morale.toFixed(1)}`,
+        `占领格数: ${unit.capturedTiles}`,
+        `出生地: ${birthSettlement ? `${birthSettlement.x}, ${birthSettlement.y}` : '无'}`
+    ].join('<br>');
+    tooltip.style.display = 'block';
+    updateUnitTooltipPosition(hoveredSettlementScreenX, hoveredSettlementScreenY);
+}
+
+function hideUnitTooltip() {
+    hoveredUnit = null;
+    const tooltip = document.getElementById('unitTooltip');
+    if (tooltip) tooltip.style.display = 'none';
+}
+
+function setupSettlementHoverPanel() {
+    const canvas = document.getElementById('mapCanvas');
+    if (!canvas || canvas.dataset.settlementHoverBound === '1') return;
+    canvas.dataset.settlementHoverBound = '1';
+    canvas.addEventListener('mousemove', (event) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = Math.floor((event.clientX - rect.left) / SCALE_FACTOR);
+        const y = Math.floor((event.clientY - rect.top) / SCALE_FACTOR);
+        hoveredSettlementScreenX = event.clientX;
+        hoveredSettlementScreenY = event.clientY;
+        const settlement = x >= 0 && x < SIZE && y >= 0 && y < SIZE ? findSettlementAt(x, y) : null;
+        hoveredSettlement = settlement;
+        hoveredUnit = x >= 0 && x < SIZE && y >= 0 && y < SIZE ? findUnitAt(x, y) : null;
+        if (settlement) renderSettlementTooltip(settlement);
+        else hideSettlementTooltip();
+        if (hoveredUnit) renderUnitTooltip(hoveredUnit);
+        else hideUnitTooltip();
+    });
+    canvas.addEventListener('mouseleave', () => {
+        hideSettlementTooltip();
+        hideUnitTooltip();
+    });
 }
 
 /**
@@ -177,6 +496,8 @@ function generateWorld() {
     heightMap = [];
     riverMap = [];
     ferryMap = Array.from({ length: SIZE }, () => new Int8Array(SIZE).fill(0));
+    hideSettlementTooltip();
+    hideUnitTooltip();
     const seed = Math.random() * 1000, seed2 = Math.random() * 1000, seed3 = Math.random() * 1000;
 
     // --- 步骤 1: 生成高度图 ---
@@ -376,7 +697,7 @@ function generateRivers() {
 // 计算路径上某一点的河流半径
 function getRiverWidth(pathIndex, pathLength, riverToEdge, x, y) {
     // 1. 进度影响：从源头到终点线性增长
-    const minProgressWidth = 0.1,maxProgressWidth = 2.5 - riverToEdge * 0.5;
+    const minProgressWidth = 0.1,maxProgressWidth = 1.5 - riverToEdge * 0.5;
     const progressBase = minProgressWidth + Math.min(1, 1 - pathIndex / pathLength) * (maxProgressWidth - minProgressWidth);
 
     // 2. 坡度影响：计算周围 3x3 区域的最大高度差
@@ -409,6 +730,59 @@ class Node {
         this.g = 0; // Cost from start
         this.h = 0; // Heuristic to end
         this.f = 0; // Total
+    }
+}
+
+class MinHeap {
+    constructor() {
+        this.heap = [];
+    }
+
+    get size() {
+        return this.heap.length;
+    }
+
+    push(node) {
+        this.heap.push(node);
+        this.bubbleUp(this.heap.length - 1);
+    }
+
+    pop() {
+        if (this.heap.length === 0) return null;
+        const top = this.heap[0];
+        const last = this.heap.pop();
+        if (this.heap.length > 0) {
+            this.heap[0] = last;
+            this.bubbleDown(0);
+        }
+        return top;
+    }
+
+    bubbleUp(index) {
+        while (index > 0) {
+            const parentIndex = Math.floor((index - 1) / 2);
+            if (this.heap[index].g >= this.heap[parentIndex].g) break;
+            [this.heap[index], this.heap[parentIndex]] = [this.heap[parentIndex], this.heap[index]];
+            index = parentIndex;
+        }
+    }
+
+    bubbleDown(index) {
+        const length = this.heap.length;
+        while (true) {
+            let smallest = index;
+            const left = index * 2 + 1;
+            const right = left + 1;
+            if (left < length && this.heap[left].g < this.heap[smallest].g) {
+                smallest = left;
+            }
+            if (right < length && this.heap[right].g < this.heap[smallest].g) {
+                smallest = right;
+            }
+            if (smallest === index) break;
+            [this.heap[index], this.heap[smallest]] = [this.heap[smallest], this.heap[index]];
+            index = smallest;
+        }
     }
 }
 
@@ -552,9 +926,14 @@ function drawMap() {
     if (Array.isArray(unitOwner) && unitOwner.length === SIZE) {
         drawUnitOverlay(ctx);
     }
+    if (showRoads) drawRoads(ctx);
+    drawTerritoryLabels(ctx);
     // 人烟
     drawSettlements(ctx);
     if (showUnitPositions) drawUnitPositions(ctx);
+    if (showParentArrows) drawParentArrows(ctx);
+    if (hoveredSettlement) renderSettlementTooltip(hoveredSettlement);
+    if (hoveredUnit) renderUnitTooltip(hoveredUnit);
 }
 /**
  * ------------------------------------------------------------------
@@ -562,16 +941,17 @@ function drawMap() {
  * ------------------------------------------------------------------
  */
 let settlements = []; // 存放 {x, y, score}
-let settlementMap = []; // 标记某位置生成的定居点索引
 
 function generateSettlements() {
-    settlementMap = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(-1));
     settlements = [];
+    settlementMap = Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
+    settlementScores = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
+    road = Array.from({ length: SIZE }, () => new Int8Array(SIZE).fill(0));
     const candidates = [];
     const MIN_DISTANCE = 4; // 泊松采样排斥半径：定居点之间至少隔4格
     // 1. 遍历地图计算每个点的“定居点适宜度”
-    for (let x = 2; x < SIZE - 2; x++) {
-        for (let y = 2; y < SIZE - 2; y++) {
+    for (let x = 0; x < SIZE; x++) {
+        for (let y = 0; y < SIZE; y++) {
             const h = heightMap[x][y];
             
             // 基础过滤：不在水里(h<0.3)，不在河道内(riverMap)，不在高山(h>0.75)
@@ -590,13 +970,14 @@ function generateSettlements() {
 
             // 综合评分：平原得分高 + 水源加分 - 随机扰动(增加多样性)
             const fitness = (1 - h) * 50 + waterScore + Math.random() * 10;
+            settlementScores[x][y] = fitness;
             candidates.push({ x, y, score: fitness });
         }
     }
 
     // 2. 按分数从高到低排序 (优先占领风水宝地)
     candidates.sort((a, b) => b.score - a.score);
-    const topPercentage = 0.2;
+    const topPercentage = 0.15;
     const topCount = Math.floor(candidates.length * topPercentage);
     
     // Fisher-Yates 洗牌算法仅作用于头部区间
@@ -605,10 +986,9 @@ function generateSettlements() {
         [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
     }
 
-
-    // 3. 泊松采样排斥检查
+    // 3. 仅为初始阵营挑选足够的定居点，不再额外生成中立点
     for (let cand of candidates) {
-        if (settlements.length >= DESIRED_SETTLEMENTS) break;
+        if (settlements.length >= initialFactions) break;
 
         // 检查是否与已有的定居点太近
         let tooClose = false;
@@ -621,8 +1001,40 @@ function generateSettlements() {
         }
 
         if (!tooClose) {
-            settlements.push({ x: cand.x, y: cand.y, score: cand.score, faction: -1, stability: 60, garrison: 25, prod: 0, spawnCount: 0 });
-            settlementMap[cand.x][cand.y] = settlements.length - 1; // 标记为已生成，索引为数组长度-1，因为数组从0开始计数
+            settlements.push({// settlements有三处定义，要改一起改
+                x: cand.x,
+                y: cand.y,
+                faction: 0,
+                score: cand.score,
+                resource: 100,
+                reservedResource: 0, // 已预约资源
+                population: 10,
+                techLevel: 1,
+                lastCapturer: null,
+                isDestroyed: false,
+                parentX: null,
+                parentY: null
+            });
+        }
+    }
+    if (settlements.length < initialFactions) {
+        for (const cand of candidates) {
+            if (settlements.length >= initialFactions) break;
+            if (settlements.some(s => s.x === cand.x && s.y === cand.y)) continue;
+            settlements.push({ // settlements有三处定义，要改一起改
+                x: cand.x,
+                y: cand.y,
+                faction: 0,
+                score: cand.score,
+                resource: 100,
+                reservedResource: 0, // 已预约资源
+                population: 10,
+                techLevel: 1,
+                lastCapturer: null,
+                isDestroyed: false,
+                parentX: null,
+                parentY: null
+            });
         }
     }
     for (let x = 0; x < SIZE; x++) {
@@ -631,6 +1043,7 @@ function generateSettlements() {
     }
     for (let i = 0; i < settlements.length; i++) {
         const s = settlements[i];
+        settlementMap[s.x][s.y] = s;
         const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
         let isFerry = 0;
         for (let k = 0; k < dirs.length; k++) {
@@ -639,8 +1052,148 @@ function generateSettlements() {
         }
         if (isFerry) ferryMap[s.x][s.y] = 1;
     }
+
 }
 // 在 drawMap() 的最后面添加
+function drawRoads(ctx) {
+    if (!Array.isArray(road) || road.length !== SIZE) return;
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)'; // 白色
+    for (let x = 0; x < SIZE; x++) {
+        const row = road[x];
+        if (!row) continue;
+        for (let y = 0; y < SIZE; y++) {
+            if (!row[y]) continue;
+            const inset = SCALE_FACTOR * 0.2;
+            const size = Math.max(1, SCALE_FACTOR - inset * 2);
+            ctx.fillRect(x * SCALE_FACTOR + inset, y * SCALE_FACTOR + inset, size, size);
+        }
+    }
+    ctx.restore();
+}
+
+function updateTerritoryLabels() {
+    if (!Array.isArray(unitOwner) || unitOwner.length !== SIZE) {
+        factionAreas = [];
+        return;
+    }
+    const visited = Array.from({ length: SIZE }, () => new Uint8Array(SIZE));
+    const groupedAreas = new Map();
+    const dirs = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
+
+    for (let x = 0; x < SIZE; x++) {
+        const row = unitOwner[x];
+        if (!row) continue;
+        for (let y = 0; y < SIZE; y++) {
+            const fid = row[y];
+            if (fid <= 0 || visited[x][y]) continue;
+
+            const queue = [{ x, y }];
+            let head = 0;
+            visited[x][y] = 1;
+
+            let area = 0;
+            let sumX = 0;
+            let sumY = 0;
+            let minX = x;
+            let maxX = x;
+            let minY = y;
+            let maxY = y;
+            const cells = [];
+
+            while (head < queue.length) {
+                const cur = queue[head++];
+                area += 1;
+                sumX += cur.x + 0.5;
+                sumY += cur.y + 0.5;
+                cells.push({ x: cur.x, y: cur.y });
+                if (cur.x < minX) minX = cur.x;
+                if (cur.x > maxX) maxX = cur.x;
+                if (cur.y < minY) minY = cur.y;
+                if (cur.y > maxY) maxY = cur.y;
+
+                for (const d of dirs) {
+                    const nx = cur.x + d.x;
+                    const ny = cur.y + d.y;
+                    if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+                    if (visited[nx][ny] || unitOwner[nx][ny] !== fid) continue;
+                    visited[nx][ny] = 1;
+                    queue.push({ x: nx, y: ny });
+                }
+            }
+
+            if (area < FACTION_MIN_AREA_FOR_LABEL) continue;
+
+            const centerX = sumX / area;
+            const centerY = sumY / area;
+            const width = maxX - minX;
+            const height = maxY - minY;
+            const principalAxis = getAreaPrincipalAxis(cells, centerX, centerY, width, height);
+
+            const list = groupedAreas.get(fid) || [];
+            list.push({
+                centerX,
+                centerY,
+                width,
+                height,
+                name: getFactionName(fid),
+                area,
+                cells,
+                theta: principalAxis.theta,
+                projectionSpan: principalAxis.span
+            });
+            groupedAreas.set(fid, list);
+        }
+    }
+
+    factionAreas = Array.from(groupedAreas.entries())
+        .map(([factionId, areas]) => ({
+            factionId,
+            areas: areas
+                .sort((a, b) => b.area - a.area)
+                .slice(0, FACTION_MAX_LABELS_PER_FACTION)
+        }))
+        .filter(entry => entry.areas.length > 0);
+}
+
+function drawTerritoryLabels(ctx) {
+    if (!Array.isArray(factionAreas) || factionAreas.length === 0) return;
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    for (const factionEntry of factionAreas) {
+        const baseColor = COLORS[(factionEntry.factionId - 1) % COLORS.length];
+        ctx.fillStyle = getColorWithAlpha(baseColor, FACTION_LABEL_ALPHA);
+        ctx.strokeStyle = `rgba(0, 0, 0, ${FACTION_LABEL_STROKE_ALPHA})`;
+
+        for (const area of factionEntry.areas) {
+            const fontSize = clamp(
+                FACTION_LABEL_BASE_FONT_SIZE + area.projectionSpan * LABEL_PROJECTION_SPAN_WEIGHT * FACTION_LABEL_FONT_SCALE / Math.max(1, area.name.length),
+                FACTION_LABEL_MIN_FONT_SIZE,
+                FACTION_LABEL_MAX_FONT_SIZE
+            );
+            ctx.font = `bold ${fontSize}px 'Trebuchet MS', 'Georgia', serif`;
+            ctx.lineWidth = Math.max(2, fontSize * LABEL_STROKE_LINE_WIDTH_RATIO);
+            const drawX = area.centerX * SCALE_FACTOR;
+            const drawY = area.centerY * SCALE_FACTOR;
+            ctx.save();
+            ctx.translate(drawX, drawY);
+            if (LABEL_ROTATION_ENABLED) {
+                ctx.rotate(area.theta || 0);
+            }
+            ctx.strokeText(area.name, 0, 0);
+            ctx.fillText(area.name, 0, 0);
+            ctx.restore();
+        }
+    }
+
+    ctx.restore();
+}
+
 function drawSettlements(ctx) {
     settlements.forEach(s => {
         let color = NEUTRAL_COLOR;
@@ -655,67 +1208,142 @@ function drawSettlements(ctx) {
         ctx.lineWidth = 1;
         ctx.fillRect(px, py, size, size);
         ctx.strokeRect(px, py, size, size);
+        /*
+        if (showRoads) {
+            // 显示科技等级数字
+            ctx.fillStyle = '#fff';
+            ctx.font = `bold ${Math.floor(SCALE_FACTOR * 3)}px "Segoe UI", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const textX = s.x * SCALE_FACTOR + SCALE_FACTOR * 0.6;
+            const textY = s.y * SCALE_FACTOR + SCALE_FACTOR * 0.6 - 10;
+            ctx.fillText(s.techLevel, textX, textY);
+        }*/
     });
 }
+function drawParentArrows(ctx) {
+    if (!Array.isArray(settlements)) return;
+    ctx.save();
+    ctx.strokeStyle = '#FFFF00';   // 黄色箭头
+    ctx.fillStyle = '#FFFF00';
+    ctx.lineWidth = Math.max(1.5, SCALE_FACTOR * 0.3);
+
+    for (const s of settlements) {
+        if (s.parentX == null || s.parentY == null) continue;
+
+        const parent = findSettlementAt(s.parentX, s.parentY);
+        if (!parent || parent.isDestroyed) continue;   // 父定居点不存在则不画
+
+        const startX = (parent.x + 0.5) * SCALE_FACTOR;
+        const startY = (parent.y + 0.5) * SCALE_FACTOR;
+        const endX   = (s.x + 0.5) * SCALE_FACTOR;
+        const endY   = (s.y + 0.5) * SCALE_FACTOR;
+
+        // 画线段
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+
+        // 画箭头（在子节点端）
+        const angle = Math.atan2(endY - startY, endX - startX);
+        const arrowSize = Math.max(3, SCALE_FACTOR * 0.7);
+        const leftX  = endX - arrowSize * Math.cos(angle - Math.PI / 6);
+        const leftY  = endY - arrowSize * Math.sin(angle - Math.PI / 6);
+        const rightX = endX - arrowSize * Math.cos(angle + Math.PI / 6);
+        const rightY = endY - arrowSize * Math.sin(angle + Math.PI / 6);
+
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(leftX, leftY);
+        ctx.lineTo(rightX, rightY);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    ctx.restore();
+}
 // 初始化运行
+setupSettlementHoverPanel();
 generateWorld();
 
 function initFactions() {
     unitOwner = Array.from({ length: SIZE }, () => new Int16Array(SIZE).fill(-1));
     unitStrength = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
-    const initialFactions = Math.floor(SIZE * 0.1);
-    COLORS = generateDistinctColors(initialFactions);
-    factions = Array.from({ length: initialFactions }, (_, i) => ({ id: i + 1, color: COLORS[i] }));
-    const shuffled = [...settlements].sort(() => Math.random() - 0.5);
-    for (let i = 0; i < settlements.length; i++) {
+    road = Array.from({ length: SIZE }, () => new Int8Array(SIZE).fill(0));
+    COLORS = generateDistinctColors(FACTION_COUNT);
+    const availableNames = shuffleArray([...FACTION_NAME_POOL]);
+    while (availableNames.length < FACTION_COUNT) {
+        availableNames.push(`文明${availableNames.length + 1}`);
+    }
+    factions = Array.from({ length: FACTION_COUNT }, (_, i) => ({
+        id: i + 1,
+        color: COLORS[i],
+        name: availableNames[i]
+    })); // 初始化所有阵营
+    for (let i = 0; i < settlements.length; i++) { // 初始化所有settlement的阵营为0
         settlements[i].faction = 0;
-        settlements[i].stability = settlements[i].stability ?? 60;
-        settlements[i].garrison = settlements[i].garrison ?? 25;
-        settlements[i].prod = settlements[i].prod ?? 0;
-        settlements[i].spawnCount = settlements[i].spawnCount ?? 0;
+        settlements[i].lastCapturer = null;
+        settlements[i].isDestroyed = false;
+        settlements[i].parentX = null;
+        settlements[i].parentY = null;
     }
-    const target = Math.min(initialFactions, shuffled.length);
-    const chosen = [];
-    let r = Math.max(4, Math.floor(SIZE * 0.08));
-    while (chosen.length < target && r >= 4) {
-        for (let c of shuffled) {
-            if (chosen.length >= target) break;
-            let ok = true;
-            for (let s of chosen) {
-                if (Math.hypot(c.x - s.x, c.y - s.y) < r) { ok = false; break; }
-            }
-            if (ok) chosen.push(c);
-        }
-        if (chosen.length < target) {
-            r -= 2;
-        }
-    }
-    if (chosen.length < target) {
-        for (let c of shuffled) {
-            if (chosen.length >= target) break;
-            if (!chosen.includes(c)) chosen.push(c);
-        }
-    }
+    const chosen = settlements.slice(0, initialFactions); // 选择初始阵营的settlement
     const assignCount = chosen.length;
     for (let i = 0; i < assignCount; i++) {
         chosen[i].faction = i + 1;
-        chosen[i].stability = 80;
-        chosen[i].garrison = 30;
-        chosen[i].prod = 0;
         unitOwner[chosen[i].x][chosen[i].y] = chosen[i].faction;
     }
 }
 
 class Unit {
-    constructor(x, y, faction) {
+    constructor(x, y, faction, superior = null, initialHealth = 100, techLevel = 1, birthSettlement = null) {
         this.x = x;
         this.y = y;
         this.faction = faction;
-        this.health = 70;
+        this.health = initialHealth;
+        this.initialHealth = initialHealth;
+        this.techLevel = techLevel;
         this.morale = 100;
         this.supply = 100;
+        this.isDead = false;
+        this.superior = superior;
+        this.birthSettlement = getActiveSettlement(birthSettlement ?? findSettlementAt(this.x, this.y));
+        this.lastCapturedSettlement = this.birthSettlement ? { x: this.birthSettlement.x, y: this.birthSettlement.y } : null;
         this.factionLastBetray = -1; // 本单位所在阵营中的其他单位上次背叛到的阵营ID
         this.maxWaveDis = 0; // 本单位历史上接收过的波的距离的最大值
+        this.capturedTiles = 0;
+        this._supplyPath = null;
+        this.supplyCost = 0;
+        this.supplySettlement = null;
+        this._supplyTimer = 0;
+        this._supplyCooldown = 10;
+    }
+}
+
+function syncWithSuperior(u) {
+    if (!u.superior) {
+        //console.log(waveFrom[u.x][u.y]);
+        if (waveDis[u.x][u.y] < 10 * coverRadius(u) && u.maxWaveDis > 150) { // 单位距离波中心距离较小，把波源单位当作上级单位
+            u.superior = waveFrom[u.x][u.y];
+        }
+        return;
+    };
+    if (u.superior.isDead) {
+        u.health *= 0.5; // 上级单位死亡后，本单位生命值减少50%
+        u.superior = null;
+        return;
+    }
+    if (u.morale < u.superior.morale) {
+        u.morale = u.superior.morale;
+    }
+    if (u.faction !== u.superior.faction) {
+        u.faction = u.superior.faction;
+        u.maxWaveDis = 0;
+        u.health = u.initialHealth;
+        u.morale = 100;
+        u.betray = true;
+        u.superior = null;
     }
 }
 
@@ -741,11 +1369,11 @@ function chooseMove(u) {
     for (const o of opts) {
         if (o.x < 0 || o.x >= SIZE || o.y < 0 || o.y >= SIZE) { rates.push(0); continue; }
         let r = 1;
-        if (riverMap[o.x][o.y] === 1) r *= 0.3;
-        if (heightMap[u.x][u.y] > 0.5 && heightMap[o.x][o.y] < heightMap[u.x][u.y]) r *= 1.5;
-        if (heightMap[u.x][u.y] > 0.8 && heightMap[o.x][o.y] < heightMap[u.x][u.y]) r *= 3;
+        if (riverMap[o.x][o.y] === 1) r *= 0.8;
+        if (heightMap[u.x][u.y] > 0.4 && heightMap[o.x][o.y] < heightMap[u.x][u.y]) r *= 1.5;
+        if (heightMap[u.x][u.y] > 0.6 && heightMap[o.x][o.y] < heightMap[u.x][u.y]) r *= 3;
 
-        const s = settlements.find(ss => ss.x === o.x && ss.y === o.y);
+        const s = findSettlementAt(o.x, o.y);
         if (s) {
             if(s.faction > 0 && s.faction === u.faction) r *= 1.2;
             else if(s.faction === 0) r *= 1.8;
@@ -767,6 +1395,21 @@ function chooseMove(u) {
                 else r *= 10;
             }
         }
+        if (u.superior && !u.superior.isDead && (u.superior.morale < 30 || unitOwner[u.x][u.y] !== u.faction)) { 
+            //有上级时，且上级士气低于30或我不在本阵营领地时，倾向于向上级移动
+            const currentDist = Math.abs(u.x - u.superior.x) + Math.abs(u.y - u.superior.y);
+            const nextDist = Math.abs(o.x - u.superior.x) + Math.abs(o.y - u.superior.y);
+            if (nextDist < currentDist) r *= 20;
+            else if (nextDist > currentDist) r *= 0.05;
+        }
+        let birthZone = getActiveSettlement(u.birthSettlement);
+        if (birthZone && (u.morale < 30 || u._supplyPath === null) && unitOwner[o.x][o.y] === u.faction) {
+            let dis1 = Math.abs(u.x - birthZone.x) + Math.abs(u.y - birthZone.y);
+            let dis2 = Math.abs(o.x - birthZone.x) + Math.abs(o.y - birthZone.y);
+            if(dis2 < dis1) r *= 20;
+            else if (dis2 > dis1) r *= 0.05;
+        }
+        
         rates.push(r);
     }
     const sum = rates.reduce((a, b) => a + b, 0);
@@ -779,7 +1422,7 @@ function chooseMove(u) {
     return opts[0];
 }
 function coverRadius(u) { //单位覆盖地区的半径
-    let r = Math.max(1, Math.floor(u.health / 20));
+    let r = Math.max(1, Math.floor(u.health / 15));
     // 坡度影响：计算周围 3x3 区域的最大高度差
     let maxDiff = 0, riverCount = 0, mountCount = 0;
     const currentH = heightMap[u.x][u.y];
@@ -788,8 +1431,8 @@ function coverRadius(u) { //单位覆盖地区的半径
             const nx = u.x + dx, ny = u.y + dy;
             if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
                 maxDiff = Math.max(maxDiff, Math.abs(heightMap[nx][ny] - currentH));
-		if(riverMap[nx][ny] === 1) riverCount ++;
-		if(heightMap[nx][ny] > 0.6) mountCount ++;
+		        if(riverMap[nx][ny] === 1) riverCount ++;
+		        if(heightMap[nx][ny] > 0.6) mountCount ++;
             }
         }
     }
@@ -798,6 +1441,7 @@ function coverRadius(u) { //单位覆盖地区的半径
     // 如果极为平坦，widthFactor 接近 1.2
    // 如果有高山/河流，涂色宽度减少
     const widthFactor = Math.max(0.1, 1.2 - (maxDiff * 3.5) - mountCount * 0.1 - riverCount * 0.05);
+    
     return Math.floor(r * widthFactor);
 }
 function paintByUnit(u) {
@@ -810,29 +1454,324 @@ function paintByUnit(u) {
             if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
             const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist <= r) {
+                const oldFaction = unitOwner[nx][ny];
+                const settlement = findSettlementAt(nx, ny);
                 if (u.health > unitStrength[nx][ny]) {
-                    const oldFaction = unitOwner[nx][ny];
                     unitStrength[nx][ny] = u.health;
+                    if (ferryMap[nx][ny] === 1) unitStrength[nx][ny] *= 0.5; // 渡口占领程度弱
                     unitOwner[nx][ny] = u.faction;
-                        
-                    if (settlementMap[nx][ny] !== -1) { // 如果有定居点
-                        const s = settlements[settlementMap[nx][ny]];
-                        if (oldFaction !== u.faction) { // 如果定居点阵营改变
-                            if(oldFaction == -1 || u.morale == 100) s.spawnCount = Math.max(0, (s.spawnCount || 0) - 4);
-                            if(u.maxWaveDis < SIZE * 0.2) s.spawnCount = Math.max(0, (s.spawnCount || 0) - 1);
-                            else s.spawnCount = Math.max(0, (s.spawnCount || 0) + 1);
-                            // 如果单位远道而来，定居点产兵速率下降
-                        }
-                        s.faction = u.faction;
-                    }   
+                    if (oldFaction !== u.faction) {
+                        u.capturedTiles += 1;
+                    }
+                    if(settlement && settlement.faction == u.faction) {
+                        u.capturedTiles = 0;
+                    }
+
+                    if (oldFaction > 0 && oldFaction !== u.faction && road[nx]) {
+                        road[nx][ny] = 0;
+                    }
+                    if (settlement && settlement.faction !== u.faction) {
+                        handleSettlementCapture(u, settlement); // 已整合阵营标记、lastCapturer等内容
+                    }
+		            if (oldFaction !== u.faction && oldFaction !== -1) emitWave(nx, ny, u.morale * 2.5, u);
                 }
                 else if(unitOwner[nx][ny] !== u.faction) {
-                    unitStrength[nx][ny] = Math.max(0, unitStrength[nx][ny] - STRENGTH_DECAY);
-                    
+                    unitStrength[nx][ny] = Math.max(0, unitStrength[nx][ny] - STRENGTH_DECAY * u.health);
+                    if (settlement) {
+                        emitWave(nx, ny, u.health * 2, u);
+                    }
+		            else if (nx == u.x && ny == u.y) unitOwner[nx][ny] = u.faction;
                 }
             }
         }
     }
+}
+
+function handleSettlementCapture(u, settlement) {
+    settlement = getActiveSettlement(settlement);
+    if (!settlement || settlement.faction === u.faction) return;
+    const moraleRatio = Math.max(0, Math.min(1, u.morale / 100));
+    const destroyChance = Math.pow(1.1 - moraleRatio, 1) * 5;
+    if (Math.random() < destroyChance) {
+        destroySettlement(settlement);
+        return;
+    }
+    // 占领后清除父节点信息
+    settlement.parentX = null;
+    settlement.parentY = null;
+    
+    const current = { x: settlement.x, y: settlement.y };
+    const last = u.lastCapturedSettlement;
+    if (last && (last.x !== current.x || last.y !== current.y)) {
+        buildRoadBetweenSettlements(last.x, last.y, current.x, current.y);
+    }
+    settlement.faction = u.faction;
+    settlement.resource *= 0.5;
+    settlement.lastCapturer = u;
+    u.lastCapturedSettlement = current;
+}
+
+function roadHeuristic(x, y, endX, endY) {
+    return Math.abs(x - endX) + Math.abs(y - endY);
+}
+
+function roadStepCost(x, y, nx, ny) {
+    const slope = Math.abs(heightMap[nx][ny] - heightMap[x][y]);
+    let cost = 1 + slope * 24;
+    if (riverMap[nx][ny] === 1) cost += 18;
+    if (road[nx] && road[nx][ny] === 1) cost *= 0.2;
+    if (ferryMap[nx] && ferryMap[nx][ny] === 1) cost *= 0.5;
+    if (findSettlementAt(nx, ny)) cost *= 0.8;
+    return cost;
+}
+
+function supplyStepCost(x, y, nx, ny) {
+    const slope = Math.abs(heightMap[nx][ny] - heightMap[x][y]);
+    let cost = 1 + slope * 24;
+    if (road[x][y] && road[nx][ny] === 1) cost *= 0.2;
+    if (riverMap[nx][ny] === 1 && riverMap[x][y] === 1) cost = 0.1; // 河流到河流成本为0
+    if (riverMap[nx][ny] !== riverMap[x][y] && 
+        ((riverMap[nx][ny] === 0 && ferryMap[nx][ny] === 0) || (riverMap[nx][ny] === 1 && ferryMap[nx][ny] === 1))) cost = 1000; // 水运一定要走渡口上岸/下岸
+    return cost;
+}
+
+function findRoadPath(startX, startY, endX, endY) {
+    const openList = [];
+    const openMap = new Map();
+    const closedSet = new Set();
+    const maxLoops = SIZE * SIZE * 4;
+    const startNode = new Node(startX, startY);
+    startNode.h = roadHeuristic(startX, startY, endX, endY);
+    startNode.f = startNode.h;
+    openList.push(startNode);
+    openMap.set(`${startX},${startY}`, startNode);
+
+    let loopCount = 0;
+    while (openList.length > 0) {
+        loopCount++;
+        if (loopCount > maxLoops) return null;
+
+        let lowestIndex = 0;
+        for (let i = 1; i < openList.length; i++) {
+            if (openList[i].f < openList[lowestIndex].f) lowestIndex = i;
+        }
+        const current = openList[lowestIndex];
+        openList.splice(lowestIndex, 1);
+        openMap.delete(`${current.x},${current.y}`);
+
+        if (current.x === endX && current.y === endY) {
+            const path = [];
+            let node = current;
+            while (node) {
+                path.push({ x: node.x, y: node.y });
+                node = node.parent;
+            }
+            path.reverse();
+            return path;
+        }
+
+        closedSet.add(`${current.x},${current.y}`);
+        const neighbors = [
+            { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }
+        ];
+        for (const offset of neighbors) {
+            const nx = current.x + offset.x;
+            const ny = current.y + offset.y;
+            if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) continue;
+            const key = `${nx},${ny}`;
+            if (closedSet.has(key) || unitOwner[nx][ny] !== unitOwner[current.x][current.y]) continue;// 阵营需保持一致
+
+            const gScore = current.g + roadStepCost(current.x, current.y, nx, ny);
+            let neighbor = openMap.get(key);
+            if (!neighbor) {
+                neighbor = new Node(nx, ny, current);
+                neighbor.g = gScore;
+                neighbor.h = roadHeuristic(nx, ny, endX, endY);
+                neighbor.f = neighbor.g + neighbor.h;
+                openList.push(neighbor);
+                openMap.set(key, neighbor);
+            } else if (gScore < neighbor.g) {
+                neighbor.g = gScore;
+                neighbor.parent = current;
+                neighbor.f = neighbor.g + neighbor.h;
+            }
+        }
+    }
+    return null;
+}
+
+function buildRoadBetweenSettlements(startX, startY, endX, endY) {
+    const manhattan = Math.abs(startX - endX) + Math.abs(startY - endY);
+    if (manhattan <= 0) return;
+    const path = findRoadPath(startX, startY, endX, endY);
+    if (!path || path.length - 1 > manhattan * 2) return;
+    for (const p of path) {
+        road[p.x][p.y] = 1;
+    }
+    if(startX === endX && startY === endY) return;
+    const settlement = findSettlementAt(endX, endY);
+    if(settlement) { // 确定定居点父节点
+        settlement.parentX = startX;
+        settlement.parentY = startY;
+    }
+}
+
+function requestSupply(u) {
+    const birthZone = getActiveSettlement(u.birthSettlement);
+
+    u._supplyTimer -- ; // 计时器
+    if (u._supplyTimer <= 0) { // 冷却时间到, 重新计算路径
+        u._supplyTimer = u._supplyCooldown;
+
+        if (u.x < 0 || u.x >= SIZE || u.y < 0 || u.y >= SIZE || unitOwner[u.x][u.y] !== u.faction) { // 超出边界或不在领土内
+            u._supplyPath = null;
+            u.supplyCost = 0;
+            u.supplySettlement = null;
+        } else { // 计算路径
+            const heap = new MinHeap();
+            const costSoFar = Array.from({ length: SIZE }, () => new Float64Array(SIZE).fill(Infinity));
+            const parent = Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
+            const neighbors = [
+                { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }
+            ];
+            let foundPath = false;
+
+            heap.push({ x: u.x, y: u.y, g: 0 });
+            costSoFar[u.x][u.y] = 0;
+
+            while (heap.size > 0) {
+                const current = heap.pop(); // 从堆中取出当前节点（g值最小）
+                if (!current) break;
+                const { x, y, g } = current;
+                if (g > costSoFar[x][y]) continue;
+
+                const settlement = findSettlementAt(x, y);
+                if (settlement && settlement.faction === u.faction && settlement.resource >= 5) {
+                    const totalCost = g;
+                    const supplyCost = (5 + Math.pow(1.01, totalCost)); // 计算需求量(单帧的需求量)
+                    const demand = supplyCost * u._supplyCooldown; // 计算需求量(整段冷却时间内的需求量)
+                    if (settlement.resource - settlement.reservedResource >= demand) { // 足够资源(考虑预约资源)
+                        settlement.reservedResource += demand; // 预约资源
+                        const path = [];
+                        let px = x;
+                        let py = y;
+                        while (true) {
+                            path.push({ x: px, y: py });
+                            const prev = parent[px][py];
+                            if (!prev) break;
+                            px = prev.x;
+                            py = prev.y;
+                        }
+                        path.reverse(); // 反转路径, 从目标到起点（这行真的需要吗？）
+
+                        u._supplyPath = path;
+                        u.supplyCost = supplyCost; // 记录需求量(单帧的需求量)
+                        u.supplySettlement = settlement;
+                        foundPath = true;
+                        
+                        if (!birthZone) u.birthSettlement = u.supplySettlement; // 有补给点了，设为空缺的出生点
+                        break;
+                    }
+                }
+
+                for (const offset of neighbors) {
+                    const nx = x + offset.x;
+                    const ny = y + offset.y;
+                    if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) continue;
+                    if (unitOwner[nx][ny] !== u.faction) continue;
+
+                    const newG = g + supplyStepCost(x, y, nx, ny); // 计算新路径成本
+                    if (newG >= costSoFar[nx][ny]) continue;
+
+                    costSoFar[nx][ny] = newG;
+                    parent[nx][ny] = { x: x, y: y };
+                    heap.push({ x: nx, y: ny, g: newG });
+                }
+            }
+
+            if (!foundPath) { // 未找到路径
+                u._supplyPath = null;
+                u.supplyCost = 0;
+                u.supplySettlement = null;
+            }
+        }
+    }
+
+
+    if (Array.isArray(u._supplyPath) && u._supplyPath.length > 0 && u.supplySettlement !== null && u.supplySettlement.resource >= u.supplyCost) { // 存在路径
+        u.supplySettlement.resource -= u.supplyCost; // 减少资源
+        u.supplySettlement.reservedResource -= u.supplyCost; // 收回预约资源
+        u.health = Math.min(u.initialHealth, u.health + 0.5); // 增加生命值
+        return true;
+    }
+    // 未找到路径
+    if (birthZone) {
+        u.morale -= 10 * (100 - u.morale) / 100;
+        u.health -= 5 * (100 - u.health) / 100;
+        // 没有出生点的单位对断补给免疫
+    }
+    return false;
+}
+
+function isPotentialFerry(x, y) { // 是否为潜在的河口
+    if (riverMap[x][y] === 1) return 0;
+    const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+    let isFerry = 0;
+    for (const dir of dirs) {
+        const nx = x + dir.x;
+        const ny = y + dir.y;
+        if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE && riverMap[nx][ny] === 1) {
+            isFerry = 1;
+            break;
+        }
+    }
+    return isFerry;
+}
+
+function colonize(u) {
+    const x = u.x;
+    const y = u.y;
+    if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return false;
+    if (findSettlementAt(x, y)) return false;
+
+    const score = settlementScores[x] ? settlementScores[x][y] : 0;
+    if (score < 10) return false;
+    const newSettlement = {
+        x,
+        y,
+        faction: u.faction,
+        score,
+        resource: 0,
+        reservedResource: 0, // 已预约资源
+        population: 10,
+        techLevel: 1,
+        lastCapturer: null,
+        isDestroyed: false,
+        parentX: null,
+        parentY: null
+    };
+    settlements.push(newSettlement);
+    settlementMap[x][y] = newSettlement;
+    unitOwner[x][y] = u.faction;
+    unitStrength[x][y] = u.health;
+
+    const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+    let isFerry = 0;
+    for (const dir of dirs) {
+        const nx = x + dir.x;
+        const ny = y + dir.y;
+        if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE && riverMap[nx][ny] === 1) {
+            isFerry = 1;
+            break;
+        }
+    }
+    if (ferryMap[x]) ferryMap[x][y] = isFerry;
+
+    const last = u.lastCapturedSettlement;
+    if (last && Number.isFinite(last.x) && Number.isFinite(last.y)) {
+        buildRoadBetweenSettlements(last.x, last.y, x, y);
+    }
+    return true;
 }
 
 function attackByUnit(u) {
@@ -840,16 +1779,27 @@ function attackByUnit(u) {
     let target = null;
     for (const v of units) {
         if (v !== u && v.faction !== u.faction) {
-            const dist = Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y));
+            const dx = v.x - u.x;
+            const dy = v.y - u.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist <= r) {
                 if (!target || v.health > target.health) target = v;
             }
         }
     }
+    for (const settlement of settlements) {
+        if (settlement.faction === u.faction) continue;
+        const dx = settlement.x - u.x;
+        const dy = settlement.y - u.y;
+        if (Math.sqrt(dx * dx + dy * dy) <= r) {
+            settlement.resource = Math.max(0, settlement.resource - 0.5 * u.health);
+        }
+    }
     if (target) {
         target.health -= 0.01 * u.morale;
+        u.capturedTiles = 0;
         //u.health -= 1;
-        if(u.health > 0) emitWave(target.x, target.y, u.health * 1);
+        if(u.health > 0) emitWave(target.x, target.y, u.health, u);
     }
 }
 
@@ -878,24 +1828,25 @@ function updateMorale(u) {
             }
         }
     }
+    const dis = waveDis && waveDis[u.x] ? waveDis[u.x][u.y] : Infinity;
     if (unitOwner[u.x][u.y] === u.faction) {
-        const dis = waveDis && waveDis[u.x] ? waveDis[u.x][u.y] : Infinity;
         if (Number.isFinite(dis) && dis > u.maxWaveDis) u.maxWaveDis = dis;  
-        u.morale -= 0.0005 * u.maxWaveDis;
+        u.morale -= 0.000001 * u.maxWaveDis * u.maxWaveDis;
     }
-    /*
-    let enemySum = 0, friendSum = 0, crowded = 0;
-    for (const v of units) { // 计算敌人总健康值*士气
-        if (v.faction !== u.faction && Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y)) <= 4) enemySum += v.health * v.morale;
-        if (v.faction === u.faction && Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y)) <= 4) friendSum += v.health * v.morale;
-	    if (v.faction === u.faction && v.x === u.x && v.y === u.y && v) crowded += 1;
+    
+    let birthZone = getActiveSettlement(u.birthSettlement);
+    if(birthZone) {
+        const popCap = getSettlementPopCap(birthZone);
+        if(u.x == birthZone.x && u.y == birthZone.y && birthZone.population > popCap) {
+            u.health += birthZone.population - popCap;
+            birthZone.population = popCap;
+            if(u.health > u.initialHealth) u.health = u.initialHealth;
+        }
     }
-    //if (crowded > 2) u.morale --;
-    if (enemySum > 4 * friendSum) u.morale -= 5;*/
     if (u.morale <= 0) {
         u.morale = 0;
         const prevFaction = u.faction;
-        const newFaction = getNewFaction(u, 0.8);
+        const newFaction = getNewFaction(u, 0.0);
         if (newFaction !== prevFaction) {
             u.faction = newFaction;
             //const betrayInfluenceMoraleType = (Math.random() > 0.01 * units.length) ? '振奋' : '崩溃';
@@ -910,33 +1861,107 @@ function updateMorale(u) {
                         w.morale = 100;
                         w.faction = getNewFaction(w, 0.0);// 黑天鹅事件: 有0%的概率背叛到上一个本阵营单位背叛的阵营——导致本阵营单位倾向于随机叛变，天下大乱
                         w.health = Math.max(u.health * 0.5, w.health);
+                        w.betray = true;
                     }
                 }
 
             }
             u.morale = 100;
             u.maxWaveDis = 0;// 重置最大波距离，因为本单位背叛到新的阵营
+            u.birthSettlement = null; // 重置出生地，因为本单位背叛到新的阵营
+            u.betray = true;
         }
     }
     if(u.morale > 100) u.morale = 100;
+    /**
+    if(u.betray) { // 本单位背叛到新的阵营，会自动占领附近的敌方定居点（仅占领人口大于人口上限的点，且仅执行一次）
+        let newSettlement = null;
+        for (const s of settlements) {
+            const popCap = getSettlementPopCap(s);
+            if (s.faction !== u.faction && s.population > popCap && (newSettlement && Math.abs(s.x - u.x) + Math.abs(s.y - u.y) <= Math.abs(newSettlement.x - u.x) + Math.abs(newSettlement.y - u.y) || newSettlement === null)) {
+                newSettlement = s;
+            }
+        }
+        if(newSettlement) { // 找到最近的敌方定居点
+            newSettlement.faction = u.faction; 
+        }
+        u.betray = false;
+    }
+        **/
 }
-function supplyInfluenceHealth(u) {
-    let supplySum = 0;
-    for (const s of settlements) {
-        let dis = Math.max(Math.abs(s.x - u.x), Math.abs(s.y - u.y));
-        if (s.faction === u.faction) {
-            supplySum += coverRadius(u) / dis;
+
+function updateSettlements() {
+    const techSoftCap = 10;
+    for (let i = 0; i < settlements.length; i++) {
+        const settlement = settlements[i];
+        settlement.resource += settlement.score * 0.2;
+
+        const popCap = getSettlementPopCap(settlement);
+        if (settlement.population < popCap) {
+            settlement.population *= 1 + 0.05 * randomRange(0.8, 1.2); // 改大一点
+        }
+        else settlement.population -= 0.01 * (settlement.population - popCap);
+
+        const currentTech = Math.max(1, Math.floor(settlement.techLevel || 1));
+        let sameHNeighbors = 0;
+        let lowerOneNeighbors = 0;
+        for (let j = 0; j < settlements.length; j++) {
+            if (i === j) continue;
+            const other = settlements[j];
+            const dist = Math.abs(other.x - settlement.x) + Math.abs(other.y - settlement.y);
+            if (dist > 20) continue;
+            if (other.techLevel === currentTech) sameHNeighbors++;
+            if (other.techLevel === currentTech - 1) lowerOneNeighbors++;
+        }
+        if (sameHNeighbors >= 3 && currentTech < techSoftCap && Math.random() < 0.001) {
+            settlement.techLevel = currentTech + 1;
+        } else if (currentTech > 1 && lowerOneNeighbors < 3 && Math.random() < 0.001) {
+            settlement.techLevel = currentTech - 1;
+        } else {
+            settlement.techLevel = currentTech;
+        }
+
+        const initialHealth = getInitialHealth(settlement);
+        if (settlement.faction > 0 && settlement.population >= popCap && settlement.population >= initialHealth) {
+            const superior = null;//settlement.lastCapturer && !settlement.lastCapturer.isDead ? settlement.lastCapturer : null;
+            settlement.population = Math.max(1, settlement.population - initialHealth);
+            units.push(new Unit(settlement.x, settlement.y, settlement.faction, superior, initialHealth, settlement.techLevel, settlement));
+        }
+        if(settlement.parentX !== null && settlement.parentY !== null) {
+            const parent = findSettlementAt(settlement.parentX, settlement.parentY);
+            if(parent) {
+                if(parent.faction === settlement.faction) {
+
+                }
+                else { // 定居点叛变机制
+                    let rand = Math.random();
+                    if(rand < 0.7) {
+                        settlement.faction = parent.faction; // 保持阵营一致
+                        settlement.population = Math.max(1, settlement.population);
+                    }
+                    else if(rand < 0.85){
+                        settlement.faction = Math.floor(Math.random() * COLORS.length) + 1; // 叛变到随机阵营
+                        settlement.parentX = null;
+                        settlement.parentY = null;
+                        settlement.resource += parent.resource;
+                        parent.resource = 0;
+                    }
+                    else { // 不变阵营，保持人口一致
+                        settlement.parentX = null;
+                        settlement.parentY = null;
+                    }
+                }
+            }
+            else {
+                settlement.faction = Math.floor(Math.random() * COLORS.length) + 1; // 叛变到随机阵营
+                settlement.parentX = null;
+                settlement.parentY = null;
+                settlement.population = Math.max(1, settlement.population);
+            }
         }
     }
-    if (supplySum >= 1) u.supply += supplySum;
-    else if(supplySum < 0.2) u.supply -= 0.01 * u.health;
-
-    if(u.supply < 0) u.supply = 0;
-    if(u.supply > 100) u.supply = 100;
-    
-    if(u.supply == 0) u.health *= 0.9;
-    if(u.supply > u.health) u.health += 0.01;
 }
+
 function updateUnits() {
     if (typeof Unit !== 'function') return;
     if (!Array.isArray(unitOwner) || unitOwner.length !== SIZE) {
@@ -947,33 +1972,41 @@ function updateUnits() {
         waveOwner = Array.from({ length: SIZE }, () => new Int16Array(SIZE).fill(-1));
         waveStrength = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
     }
-    for (const s of settlements) {
-        s.prod += s.score * 0.02;
-        const sc = s.spawnCount || 0;
-        const threshold = 400 * Math.pow(2, sc);
-        if (s.faction > 0 && s.prod >= threshold) {
-            units.push(new Unit(s.x, s.y, s.faction));
-            s.prod -= threshold;
-            s.spawnCount = sc + 1;
-        }
-    }
+    // 定居点先更新自身状态，再进入单位行为阶段
+    updateSettlements();
     for (let i = 0; i < units.length; i++) {
         const u = units[i];
-        let enemySumLocal = 0;
-        /*for (const v of units) {
-            if (v.faction !== u.faction && Math.max(Math.abs(v.x - u.x), Math.abs(v.y - u.y)) <= coverRadius) enemySumLocal += v.health;
+        syncWithSuperior(u);
+        requestSupply(u);
+        if (u.health <= 1) {
+            u.isDead = true;
+            units.splice(i, 1);
+            i--;
+            continue;
         }
-        if (enemySumLocal > u.health) */
         const move = chooseMove(u);
         u.x = move.x;
         u.y = move.y;
 
         paintByUnit(u);
-        
+
         attackByUnit(u);
         updateMorale(u);
-        supplyInfluenceHealth(u);
+        //console.log(waveFrom);  
+
+        const birthSettlement = getActiveSettlement(u.birthSettlement); // 出生点
+        if (birthSettlement && u.health >= getInitialHealth(birthSettlement) && u.capturedTiles >= TILES_FOR_SETTLE * (isPotentialFerry(u.x, u.y) ? 0.9 : 1.1)) {
+            if (colonize(u)) {
+                u.health = 0;
+            }
+        }
+        if (u.superior && !u.superior.isDead) {
+            if(Math.abs(u.x - u.superior.x) + Math.abs(u.y - u.superior.y) > 50){
+                u.superior = null;
+            }
+        }
         if (u.health <= 1) {
+            u.isDead = true;
             units.splice(i, 1);
             i--;
         }
@@ -981,8 +2014,8 @@ function updateUnits() {
     
     for (let x = 0; x < SIZE; x++) {
         for (let y = 0; y < SIZE; y++) {
-            if (unitStrength[x][y] > 0) {
-                unitStrength[x][y] = Math.max(0, unitStrength[x][y] - STRENGTH_DECAY);
+            if (unitStrength[x][y] > 0 && !findSettlementAt(x, y)) {
+                unitStrength[x][y] = Math.max(0, unitStrength[x][y] - STRENGTH_DECAY * heightMap[x][y] * 15);
                 if (unitStrength[x][y] === 0) unitOwner[x][y] = -1;
             }
         }
@@ -991,7 +2024,7 @@ function updateUnits() {
     updateLeaderboards();
 }
 
-function drawUnitOverlay(ctx) { // 绘制单位覆盖层（领土）
+function drawUnitOverlay(ctx) {
     ctx.save();
     ctx.globalAlpha = 0.8;
     if (!Array.isArray(unitOwner) || unitOwner.length !== SIZE) {
@@ -1003,7 +2036,7 @@ function drawUnitOverlay(ctx) { // 绘制单位覆盖层（领土）
         if (!row) continue;
         for (let y = 0; y < SIZE; y++) {
             const fid = row[y];
-            if (fid > 0 && !riverMap[x][y]) { // 只绘制非河流区域的领土
+            if (fid > 0 && riverMap[x][y] === 0) {
                 const strength = unitStrength[x][y] || 0;
                 const alpha = Math.max(0, Math.min(0.8, Math.log2(strength + 1) * 0.2));
                 ctx.globalAlpha = alpha;
@@ -1014,27 +2047,28 @@ function drawUnitOverlay(ctx) { // 绘制单位覆盖层（领土）
     }
     ctx.restore();
 }
-function emitWave(x, y, intensity) {
+function emitWave(x, y, intensity, self) {
     const cur = waveStrength[x][y] || 0;
     const fid = unitOwner[x][y];
     if (intensity > cur && unitOwner[x][y] === fid && !riverMap[x][y]) { // 只允许己方单位在己方领土发射波
-        waveSources.push({ x, y, intensity, faction: fid });
+        waveSources.push({ x, y, intensity, faction: fid, from: self });
     }
-    //console.log("wave emitted at", x, y, "intensity", intensity);
 }
 function spreadCost(nx, ny, x, y) {
     const dh = Math.max(0, heightMap[nx][ny] - heightMap[x][y]);
     const curRiver = riverMap[x][y] === 1;
     const nextRiver = riverMap[nx][ny] === 1;
-    let cost = 5;
+    let cost = 100;
     if (curRiver !== nextRiver) {
         const ferry = (ferryMap[x] && ferryMap[x][y] === 1) || (ferryMap[nx] && ferryMap[nx][ny] === 1);
-        if(ferry) cost -= 4.5; // 河流-非河流成本
-        else cost += 20;
+        if(ferry) cost = 1; // 河流-非河流成本
+        else cost = 200;
     } else if (nextRiver) {
-        cost -= 4.5; // 跨河流成本
+        cost = 0.5; // 跨河流成本
     } else {
-        cost += dh * 5; // 非河流区域，高度差成本
+        cost += dh * 10; // 非河流区域，高度差成本
+        const roadHere = (road[x] && road[x][y] === 1) || (road[nx] && road[nx][ny] === 1); // 有道路
+        if(roadHere) cost = 1;
     }
     return cost;
 }
@@ -1043,6 +2077,9 @@ function propagateWaves() {
     if (!Array.isArray(unitOwner) || unitOwner.length !== SIZE) return;
     if (!Array.isArray(waveDis) || waveDis.length !== SIZE) {
         waveDis = Array.from({ length: SIZE }, () => new Float32Array(SIZE));
+    }
+    if (!Array.isArray(waveFrom) || waveFrom.length !== SIZE) {
+        waveFrom = Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
     }
     for (let x = 0; x < SIZE; x++) {
         const row = waveDis[x];
@@ -1060,18 +2097,21 @@ function propagateWaves() {
         }
     }
     const queue = [];
+    let head = 0;
     for (const src of waveSources) {
-        const { x, y, intensity, faction } = src;
+        const { x, y, intensity, faction, from } = src;
         if (unitOwner[x][y] !== faction) continue;
         if (intensity > waveStrength[x][y]) { 
             waveStrength[x][y] = intensity;
             waveOwner[x][y] = faction;
             waveDis[x][y] = 0;
+            waveFrom[x][y] = from;
+            //console.log(from);
             queue.push({ x, y });
         }
     }
-    while (queue.length) {
-        const cur = queue.shift();
+    while (head < queue.length) {
+        const cur = queue[head++];
         const s = waveStrength[cur.x][cur.y];
         const f = waveOwner[cur.x][cur.y];
         const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
@@ -1085,6 +2125,7 @@ function propagateWaves() {
                 waveStrength[nx][ny] = ns;
                 waveOwner[nx][ny] = f;
                 waveDis[nx][ny] = nd;
+                waveFrom[nx][ny] = waveFrom[cur.x][cur.y]; // 记录来源
                 if (ns > 1) queue.push({ x: nx, y: ny });
             }
         }
@@ -1099,7 +2140,7 @@ function renderLeaderboard(containerId, arr) {
         const color = COLORS[(item.id - 1) % COLORS.length];
         return `<div style="display:flex;align-items:center;gap:6px;">
             <span style="width:12px;height:12px;background:${color};display:inline-block;border:1px solid #000"></span>
-            <span>阵营${item.id}</span>
+            <span>${getFactionDisplayName(item.id)}</span>
             <span style="margin-left:auto">${item.count}</span>
         </div>`;
     }).join('');
@@ -1129,7 +2170,11 @@ function updateLeaderboards() {
 
 function unitLoop() {
     updateUnits();
+    if (territoryLabelFrameCounter % FACTION_LABEL_UPDATE_INTERVAL === 0) {
+        updateTerritoryLabels();
+    }
     drawMap();
+    territoryLabelFrameCounter += 1;
     worldTime += 1;
     simulationTimer = requestAnimationFrame(unitLoop);
 }
@@ -1138,6 +2183,8 @@ function startUnitSimulation() {
     initFactions();
     units = [];
     worldTime = 0;
+    territoryLabelFrameCounter = 0;
+    factionAreas = [];
     cancelAnimationFrame(simulationTimer);
     waveOwner = Array.from({ length: SIZE }, () => new Int16Array(SIZE).fill(-1));
     waveStrength = Array.from({ length: SIZE }, () => new Float32Array(SIZE).fill(0));
@@ -1149,7 +2196,57 @@ function toggleUnitPositions() {
     const btn = document.getElementById('toggleUnitsBtn');
     if (btn) btn.textContent = showUnitPositions ? '隐藏单位位置' : '显示单位位置';
 }
+function toggleRoads() {
+    showRoads = !showRoads;
+    const btn = document.getElementById('toggleRoadsBtn');
+    if (btn) btn.textContent = showRoads ? '隐藏道路' : '显示道路';
+    drawMap();
+}
+function toggleParentArrows() {
+    showParentArrows = !showParentArrows;
+    const btn = document.getElementById('toggleParentArrowsBtn');
+    if (btn) btn.textContent = showParentArrows ? '隐藏父‑子箭头' : '显示父‑子箭头';
+    drawMap();
+}
+function drawCommandLines(ctx) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 1)'; // 透明度
+    ctx.lineWidth = 0.5;
+    for (const u of units) {
+        if (!u.superior || u.superior.isDead) continue;
+        const x1 = u.x * SCALE_FACTOR + SCALE_FACTOR / 2;
+        const y1 = u.y * SCALE_FACTOR + SCALE_FACTOR / 2;
+        const x2 = u.superior.x * SCALE_FACTOR + SCALE_FACTOR / 2;
+        const y2 = u.superior.y * SCALE_FACTOR + SCALE_FACTOR / 2;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+function drawSupplyLines(ctx) {
+    ctx.save();
+    ctx.lineWidth = Math.max(1, SCALE_FACTOR * 0.35);
+    for (const u of units) {
+        if (!Array.isArray(u._supplyPath) || u._supplyPath.length < 2) continue;
+        const color = COLORS[(u.faction - 1) % COLORS.length];
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        for (let i = 0; i < u._supplyPath.length; i++) {
+            const p = u._supplyPath[i];
+            const px = p.x * SCALE_FACTOR + SCALE_FACTOR / 2;
+            const py = p.y * SCALE_FACTOR + SCALE_FACTOR / 2;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+    }
+    ctx.restore();
+}
 function drawUnitPositions(ctx) {
+    drawCommandLines(ctx);
+    drawSupplyLines(ctx);
     for (const u of units) {
         const color = COLORS[(u.faction - 1) % COLORS.length];
         ctx.fillStyle = color;
